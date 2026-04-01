@@ -1,0 +1,25 @@
+name: Deploy Crypto Bot
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          port: ${{ secrets.ORACLE_PORT || 22 }}
+          script: |
+            export BRANCH=main
+            export APP_ROOT=/opt/crypto_bot/app
+            export SHARED_DIR=/opt/crypto_bot/shared
+            export SERVICE_NAME=crypto-bot
+            bash /opt/crypto_bot/app/scripts/deploy.sh

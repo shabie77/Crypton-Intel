@@ -1,0 +1,15 @@
+[Unit]
+Description=Crypto Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/crypto_bot/app/crypto_bot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/crypto_bot/app/.venv/bin/python /opt/crypto_bot/app/crypto_bot/main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

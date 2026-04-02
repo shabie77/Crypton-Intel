@@ -3,7 +3,7 @@ import os
 import json
 import websockets
 import aiohttp
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import database  # Our custom SQLite SQLite Registration System
 
@@ -232,7 +232,7 @@ async def daily_digest_loop(session):
     print("📈 Daily Digest Engine is Live...")
     while True:
         try:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             target = now.replace(hour=4, minute=0, second=0, microsecond=0)
             target_date_str = target.strftime('%Y-%m-%d')
             

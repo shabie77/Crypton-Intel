@@ -1,10 +1,13 @@
 import sqlite3
 import os
 
-DB_FILE = "subscribers.db"
+DB_FILE = os.getenv("DB_FILE", "subscribers.db")
 
 def init_db():
     print("🛠️ Initializing SQLite Database...")
+    parent_dir = os.path.dirname(DB_FILE)
+    if parent_dir and not os.path.exists(parent_dir):
+        os.makedirs(parent_dir, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''

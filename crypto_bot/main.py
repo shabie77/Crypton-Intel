@@ -158,6 +158,18 @@ def save_news_state(sent_ids):
     write_json_file(path, sent_ids[-200:])
 
 
+def load_macro_state():
+    """Load the list of already-alerted macro event IDs."""
+    path = os.path.join(DATA_DIR, "macro_state.json")
+    return read_json_file(path, [])
+
+
+def save_macro_state(sent_events):
+    """Save the list of already-alerted macro event IDs."""
+    path = os.path.join(DATA_DIR, "macro_state.json")
+    write_json_file(path, sent_events[-100:])
+
+
 def has_sent_digest_today(target_date_str):
     if os.path.exists(LAST_DIGEST_FILE):
         try:
@@ -461,7 +473,7 @@ def calculate_market_pulse(snapshots, config):
     return {"score": score, "label": label, "watch_next": watch_next}
 
 
-def build_digest_message(snapshots, pulse, config, top_news=None):
+def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro=None):
     lines = [
         "<b>📰 DAILY MARKET DIGEST</b>",
         f"<b>Time:</b> {html_safe(iso_now())}",
@@ -474,9 +486,15 @@ def build_digest_message(snapshots, pulse, config, top_news=None):
         f"- <b>Powell Tone:</b> {html_safe(config['powell']['stance'].title())} ({config['powell']['score']}/5) | {html_safe(config['powell']['note'])}",
         f"- <b>ETF Note:</b> {html_safe(config['etf']['summary'])}",
         "",
-        "<b>Major Coin Snapshot</b>",
     ]
 
+    if upcoming_macro:
+        lines.append("<b>Upcoming Macro (24h)</b>")
+        for event in upcoming_macro:
+            lines.append(f"- <code>{event['time']}</code> | <b>{html_safe(event['title'])}</b> ({event['country']})")
+        lines.append("")
+
+    lines.append("<b>Major Coin Snapshot</b>")
     for symbol in config["digest"]["symbols"]:
         snapshot = next((item for item in snapshots if item and item["tag"] == symbol), None)
         if snapshot is None:
@@ -528,6 +546,52 @@ async def fetch_top_news(session):
         return top_news
     except Exception as exc:
         print(f"fetch_top_news error: {exc}")
+        return []
+
+
+async def fetch_macro_events(session):
+    """Fetch high-impact economic events for the next 24 hours."""
+    try:
+        url = "https://www.forexfactory.com/ff_calendar_thisweek.xml"
+        async with session.get(url, timeout=10) as response:
+            if response.status != 200:
+                return []
+            xml_data = await response.text()
+            
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(xml_data)
+            
+            events = []
+            now_ts = utc_now().timestamp()
+            limit_ts = now_ts + 86400  # Next 24 hours
+            
+            for item in root.findall('event'):
+                impact = item.find('impact').text
+                if impact != 'High':  # We only care about High impact
+                    continue
+                
+                title = item.find('title').text
+                country = item.find('country').text
+                date_str = item.find('date').text
+                time_str = item.find('time').text
+                
+                try:
+                    dt_str = f"{date_str} {time_str}"
+                    event_dt = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p").replace(tzinfo=timezone.utc)
+                    event_ts = event_dt.timestamp()
+                    
+                    if now_ts <= event_ts <= limit_ts:
+                        events.append({
+                            "title": title,
+                            "country": country,
+                            "time": event_dt.strftime("%H:%M UTC"),
+                            "timestamp": event_ts
+                        })
+                except:
+                    continue
+            return sorted(events, key=lambda x: x['timestamp'])
+    except Exception as exc:
+        print(f"fetch_macro_events error: {exc}")
         return []
 
 
@@ -587,8 +651,9 @@ async def send_daily_digest(session, target_date_str, mark_as_sent=True):
         snapshots.append(await fetch_symbol_snapshot(session, symbol))
 
     top_news = await fetch_top_news(session)
+    upcoming_macro = await fetch_macro_events(session)
     pulse = calculate_market_pulse(snapshots, config)
-    digest = build_digest_message(snapshots, pulse, config, top_news=top_news)
+    digest = build_digest_message(snapshots, pulse, config, top_news=top_news, upcoming_macro=upcoming_macro)
     sent = await broadcast_message(session, digest)
     database.log_alert("daily_digest", "MULTI", digest, iso_now())
     if mark_as_sent:
@@ -970,6 +1035,49 @@ async def news_checker_loop(session):
         await asyncio.sleep(300)  # Check every 5 minutes
 
 
+async def macro_calendar_loop(session):
+    """
+    Checks economic calendar for high-impact events and sends an early warning alert
+    approx 2 hours before they occur.
+    """
+    print("🏛️ Macro Calendar Watcher is Live...")
+    sent_events = load_macro_state()
+
+    while True:
+        try:
+            events = await fetch_macro_events(session)
+            now_ts = utc_now().timestamp()
+            
+            for event in events:
+                event_id = f"{event['timestamp']}_{event['title']}"
+                if event_id in sent_events:
+                    continue
+                
+                # Check if event is approx 2 hours away (7200 seconds)
+                time_until = event['timestamp'] - now_ts
+                if 0 < time_until <= 7200:
+                    alert = (
+                        f"<b>🏛️ MACRO VOLATILITY WARNING</b>\n\n"
+                        f"<b>Event:</b> {html_safe(event['title'])}\n"
+                        f"<b>Country:</b> {event['country']}\n"
+                        f"<b>Time:</b> {event['time']}\n\n"
+                        f"<b>Why it matters:</b> This is a High Impact event. Expect significant "
+                        f"volatility in BTC and ETH pairs around this time.\n"
+                        f"<b>Watch next:</b> Ensure your trade positions are secured before the data drops."
+                    )
+                    
+                    await broadcast_message(session, alert)
+                    database.log_alert("macro_warning", "GLOBAL", alert, iso_now())
+                    sent_events.append(event_id)
+                    save_macro_state(sent_events)
+                    print(f"Macro warning sent: {event['title']}")
+                    
+        except Exception as exc:
+            print(f"Macro Calendar Error: {exc}")
+
+        await asyncio.sleep(3600)  # Check once per hour
+
+
 async def telegram_long_polling(session):
     offset = None
     print("🤖 Telegram Polling Engine & Auto-Database is Live...")
@@ -1059,6 +1167,7 @@ async def main():
             rsi_scanner_loop(session),
             daily_digest_loop(session),
             news_checker_loop(session),
+            macro_calendar_loop(session),
         )
 
 

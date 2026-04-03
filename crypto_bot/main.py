@@ -64,6 +64,15 @@ DEFAULT_CONFIG = {
         "minute_utc": 0,
         "symbols": ["BTC", "ETH", "SOL"],
     },
+    "volume_settings": {
+        "high": 120.0,
+        "normal": 85.0,
+        "low": 50.0,
+    },
+    "liquidation_settings": {
+        "extreme": 500000000.0,
+        "high": 250000000.0,
+    },
 }
 
 
@@ -73,6 +82,12 @@ def utc_now():
 
 def iso_now():
     return utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def ist_now():
+    # UTC + 5:30
+    ist = utc_now() + timedelta(hours=5, minutes=30)
+    return ist.strftime("%Y-%m-%d %I:%M:%S %p IST")
 
 
 def deep_merge(base, override):
@@ -381,7 +396,7 @@ def calculate_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 
-async def fetch_symbol_snapshot(session, symbol):
+async def fetch_symbol_snapshot(session, symbol, config):
     pair = symbol_to_pair(symbol)
     url = "https://api.binance.com/api/v3/klines"
     params = {"symbol": pair, "interval": "1d", "limit": 50}
@@ -396,13 +411,30 @@ async def fetch_symbol_snapshot(session, symbol):
     sma_50 = sum(close_prices) / len(close_prices)
     rsi = calculate_rsi(close_prices)
     current_volume = volumes[-1]
-    recent_volumes = volumes[-21:-1] if len(volumes) >= 21 else volumes[:-1]
+    
+    # 20-day Moving Average (last 20 days)
+    ma_period = 20
+    recent_volumes = volumes[-ma_period:]
     average_volume = sum(recent_volumes) / max(len(recent_volumes), 1)
+    
+    # Calculate: (current_volume / 20-day MA) * 100
     volume_ratio = current_volume / average_volume if average_volume else 1.0
+    volume_percent = volume_ratio * 100
     volume_delta = (volume_ratio - 1) * 100
+    
     change_24h = ((current_price - previous_price) / previous_price * 100) if previous_price else 0.0
     trend = "BULLISH 🟢" if current_price > sma_50 else "BEARISH 🔴"
-    volume_status = "Above average" if volume_ratio >= 1.15 else "Normal"
+    
+    # Load thresholds from config
+    vol_cfg = config.get("volume_settings", DEFAULT_CONFIG["volume_settings"])
+    if volume_percent >= vol_cfg["high"]:
+        volume_status = "HIGH 🟢"
+    elif volume_percent >= vol_cfg["normal"]:
+        volume_status = "NORMAL ⚪"
+    elif volume_percent >= vol_cfg["low"]:
+        volume_status = "LOW 🔴"
+    else:
+        volume_status = "VERY LOW 🔴"
 
     return {
         "symbol": pair,
@@ -411,7 +443,7 @@ async def fetch_symbol_snapshot(session, symbol):
         "change_24h": change_24h,
         "trend": trend,
         "rsi": rsi,
-        "volume_ratio": volume_ratio,
+        "volume_percent": volume_percent,
         "volume_delta": volume_delta,
         "volume_status": volume_status,
     }
@@ -473,20 +505,31 @@ def calculate_market_pulse(snapshots, config):
     return {"score": score, "label": label, "watch_next": watch_next}
 
 
-def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro=None):
+def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None):
     lines = [
         "<b>📰 DAILY MARKET DIGEST</b>",
-        f"<b>Time:</b> {html_safe(iso_now())}",
+        f"<b>Time:</b> {html_safe(ist_now())}",
         "",
         f"<b>Market Pulse:</b> {pulse['label']} ({pulse['score']}/100)",
         f"<b>Why it matters:</b> {html_safe(config['powell']['stance'].title())} Fed tone and current trend breadth are shaping risk appetite.",
         f"<b>Watch next:</b> {html_safe(pulse['watch_next'])}",
         "",
-        "<b>Macro Context</b>",
-        f"- <b>Powell Tone:</b> {html_safe(config['powell']['stance'].title())} ({config['powell']['score']}/5) | {html_safe(config['powell']['note'])}",
-        f"- <b>ETF Note:</b> {html_safe(config['etf']['summary'])}",
-        "",
     ]
+    
+    # 24h Liquidation Section
+    if liq_stats:
+        total = liq_stats["total"]
+        liq_cfg = config.get("liquidation_settings", DEFAULT_CONFIG["liquidation_settings"])
+        status = "NORMAL ⚪"
+        if total >= liq_cfg["extreme"]:
+            status = "EXTREME 🔴"
+        elif total >= liq_cfg["high"]:
+            status = "HIGH 🟠"
+            
+        lines.append("<b>24h Liquidations</b>")
+        lines.append(f"- <b>Total:</b> ${total:,.0f} [{status}]")
+        lines.append(f"- <b>Longs:</b> ${liq_stats['longs']:,.0f} | <b>Shorts:</b> ${liq_stats['shorts']:,.0f}")
+        lines.append("")
 
     if upcoming_macro:
         lines.append("<b>Upcoming Macro (24h)</b>")
@@ -495,19 +538,15 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
         lines.append("")
 
     lines.append("<b>Major Coin Snapshot</b>")
-    for symbol in config["digest"]["symbols"]:
-        snapshot = next((item for item in snapshots if item and item["tag"] == symbol), None)
+    for snapshot in snapshots:
         if snapshot is None:
-            lines.append(f"<b>#{html_safe(symbol)}</b>: Data unavailable")
-            lines.append("- Why it matters: market input missing")
-            lines.append("- Watch next: retry next scheduled digest")
-            lines.append("")
             continue
-
-        lines.append(f"<b>#{html_safe(snapshot['tag'])}</b>: ${snapshot['price']:,.2f} ({snapshot['change_24h']:+.2f}% 24h)")
+        
+        emoji = "🔼" if snapshot["change_24h"] >= 0 else "🔽"
+        lines.append(f"<b>#{html_safe(snapshot['tag'])}</b>: ${snapshot['price']:,.2f} ({emoji} {snapshot['change_24h']:+.2f}% 24h)")
         lines.append(f"- <b>Trend:</b> {snapshot['trend']} vs 50-day average")
         lines.append(f"- <b>Daily RSI:</b> {snapshot['rsi']:.1f}")
-        lines.append(f"- <b>Volume:</b> {html_safe(snapshot['volume_status'])} ({snapshot['volume_delta']:+.1f}% vs average)")
+        lines.append(f"- <b>Volume:</b> {html_safe(snapshot['volume_status'])} ({snapshot['volume_delta']:+.1f}% vs 20-day avg)")
         lines.append("")
 
     # News section
@@ -516,7 +555,7 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
         for i, item in enumerate(top_news, 1):
             lines.append(f"{i}. {html_safe(item['title'])} — <i>{html_safe(item['source'])}</i>")
     else:
-        lines.append("- No major news detected in the last 24 hours.")
+        lines.append("- Market is relatively quiet today.")
 
     lines.append("")
     lines.append("<i>Disclaimer: Market analysis only, not financial advice.</i>")
@@ -525,24 +564,42 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
 
 
 async def fetch_top_news(session):
-    """Fetch up to 3 critical/high-importance headlines published in the last 24 hours."""
+    """
+    Fetch headlines from the last 24 hours.
+    Priority: Critical/High Importance events.
+    Fallback: General headlines if no high-impact news exists.
+    """
     try:
         url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest"
         data = await fetch_with_backoff(session, url, retries=2)
         if not data or data.get("Type") != 100:
             return []
+            
         cutoff = utc_now().timestamp() - 86400  # 24 hours ago
-        top_news = []
-        for article in data.get("Data", [])[:30]:
+        critical_high = []
+        general = []
+        
+        for article in data.get("Data", [])[:40]:
             published_on = article.get("published_on", 0)
             if published_on < cutoff:
-                continue  # Skip articles older than 24 hours
+                continue
+            
             title = article.get("title", "")
             source = article.get("source_info", {}).get("name", "")
-            if classify_news_importance(title) in ("critical", "high"):
-                top_news.append({"title": title, "source": source})
-            if len(top_news) >= 3:
+            item = {"title": title, "source": source}
+            
+            importance = classify_news_importance(title)
+            if importance in ("critical", "high"):
+                critical_high.append(item)
+            else:
+                general.append(item)
+                
+            if len(critical_high) >= 3:
                 break
+        
+        # Priority: Show critical/high news if found. 
+        # Fallback: Show general news if critical/high list is empty.
+        top_news = critical_high if critical_high else general[:3]
         return top_news
     except Exception as exc:
         print(f"fetch_top_news error: {exc}")
@@ -648,12 +705,22 @@ async def send_daily_digest(session, target_date_str, mark_as_sent=True):
     config = await load_config()
     snapshots = []
     for symbol in config["digest"]["symbols"]:
-        snapshots.append(await fetch_symbol_snapshot(session, symbol))
+        snapshots.append(await fetch_symbol_snapshot(session, symbol, config))
 
     top_news = await fetch_top_news(session)
     upcoming_macro = await fetch_macro_events(session)
+    
+    # Fetch 24h Liquidation Stats
+    cutoff_iso = (utc_now() - timedelta(hours=24)).isoformat()
+    liq_stats = database.get_24h_liquidation_stats(cutoff_iso)
+    
     pulse = calculate_market_pulse(snapshots, config)
-    digest = build_digest_message(snapshots, pulse, config, top_news=top_news, upcoming_macro=upcoming_macro)
+    digest = build_digest_message(
+        snapshots, pulse, config, 
+        top_news=top_news, 
+        upcoming_macro=upcoming_macro, 
+        liq_stats=liq_stats
+    )
     sent = await broadcast_message(session, digest)
     database.log_alert("daily_digest", "MULTI", digest, iso_now())
     if mark_as_sent:
@@ -768,10 +835,12 @@ async def binance_liquidation_listener(session):
     url = "wss://fstream.binance.com/stream?streams=btcusdt@forceOrder/ethusdt@forceOrder/solusdt@forceOrder"
     print("📡 Connecting to Binance WebSocket for Premium Top 3 Coins (BTC, ETH, SOL)...")
 
+    retry_count = 0
     while True:
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=20, close_timeout=10) as websocket:
                 print("✅ Connected to Premium Binance WebSocket successfully!")
+                retry_count = 0  # Reset counter on success
                 while True:
                     response = await websocket.recv()
                     payload = json.loads(response)
@@ -785,6 +854,9 @@ async def binance_liquidation_listener(session):
                     price = float(order_data["p"])
                     qty = float(order_data["q"])
                     total_value = price * qty
+                    
+                    # Store liquidation for 24h stats
+                    database.log_liquidation(symbol, side, total_value, iso_now())
 
                     if total_value <= 50000:
                         continue
@@ -798,22 +870,31 @@ async def binance_liquidation_listener(session):
                         continue
 
                     alert_message = (
-                        f"<b>🔥 LIQUIDATION CONTEXT ALERT</b>\n\n"
+                        f"<b>🚀 PREMIUM LIQUIDATION SIGNAL</b>\n\n"
                         f"<b>Asset:</b> #{pair_to_tag(symbol)}\n"
-                        f"<b>Trigger:</b> {position_type} liquidation\n"
+                        f"<b>Liquidation:</b> {position_type}\n"
                         f"<b>Value:</b> ${total_value:,.2f}\n"
-                        f"<b>Price:</b> ${price:,.2f}\n"
                         f"<b>Trend:</b> {trend}\n"
-                        f"<b>Why it matters:</b> {html_safe(insight)}\n"
-                        f"<b>Watch next:</b> See whether follow-through confirms this move or fades quickly."
+                        f"<b>Signal Confidence:</b> {confidence}%\n\n"
+                        f"<b>Intelligence Layer:</b> {insight}\n\n"
+                        f"<i>Disclaimer: Market analysis only, not financial advice.</i>"
                     )
 
-                    sent = await broadcast_message(session, alert_message, include_users=False)
+                    await broadcast_message(session, alert_message)
                     database.log_alert("liquidation", symbol, alert_message, iso_now())
-                    print(f"Broadcasted liquidation alert ({confidence}%) to {sent} channels")
+                    print(f"Liquid alert sent: {symbol} ${total_value:,.0f}")
+
         except Exception as exc:
-            print(f"❌ WebSocket connection dropped. Reconnecting in 5s... ({exc})")
-            await asyncio.sleep(5)
+            retry_count += 1
+            print(f"Binance WebSocket Error (Attempt {retry_count}): {exc}")
+            
+            if retry_count == 3:
+                admin_msg = f"⚠️ <b>CRITICAL ALERT</b>\n\nBinance Liquidation WebSocket failed to reconnect after 3 attempts.\nError: {html_safe(exc)}"
+                await send_telegram_message(session, ADMIN_USER_ID, admin_msg)
+                print("Admin alerted about WebSocket failure.")
+            
+            sleep_time = min(60, 5 * retry_count) # Backoff up to 60s
+            await asyncio.sleep(sleep_time)
 
 
 async def handle_admin_command(session, command, args, chat_id):

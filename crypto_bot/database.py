@@ -39,6 +39,15 @@ def init_db():
         )
     ''')
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS liquidations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT,
+            side TEXT,
+            value REAL,
+            timestamp TEXT
+        )
+    ''')
+    cursor.execute('''
         INSERT OR IGNORE INTO channels (channel_id, channel_name, status) 
         VALUES ('1120431469', 'Pes_Store (Admin)', 'ACTIVE')
     ''')
@@ -177,3 +186,34 @@ def log_alert(alert_type, symbol, content, timestamp):
     ''', (alert_type, symbol, content, timestamp))
     conn.commit()
     conn.close()
+
+def log_liquidation(symbol, side, value, timestamp):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO liquidations (symbol, side, value, timestamp)
+        VALUES (?, ?, ?, ?)
+    ''', (symbol, side, value, timestamp))
+    conn.commit()
+    conn.close()
+
+def get_24h_liquidation_stats(iso_cutoff):
+    conn = _connect()
+    cursor = conn.cursor()
+    # stats: Total Value, Long Value (BUY order), Short Value (SELL order)
+    # Side 'BUY' in forceOrder means a SHORT was liquidated.
+    # Side 'SELL' in forceOrder means a LONG was liquidated.
+    cursor.execute('''
+        SELECT 
+            SUM(value) as total,
+            SUM(CASE WHEN side = 'SELL' THEN value ELSE 0 END) as longs,
+            SUM(CASE WHEN side = 'BUY' THEN value ELSE 0 END) as shorts
+        FROM liquidations
+        WHERE timestamp >= ?
+    ''', (iso_cutoff,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if row and row[0]:
+        return {"total": row[0], "longs": row[1], "shorts": row[2]}
+    return {"total": 0.0, "longs": 0.0, "shorts": 0.0}

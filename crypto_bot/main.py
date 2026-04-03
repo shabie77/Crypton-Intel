@@ -3,6 +3,7 @@ import html
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 import aiohttp
 import websockets
@@ -565,42 +566,60 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
 
 async def fetch_top_news(session):
     """
-    Fetch headlines from the last 24 hours.
+    Fetch headlines from the last 24 hours via CoinTelegraph RSS.
     Priority: Critical/High Importance events.
     Fallback: General headlines if no high-impact news exists.
     """
     try:
-        url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest"
-        data = await fetch_with_backoff(session, url, retries=2)
-        if not data or data.get("Type") != 100:
-            return []
+        url = "https://cointelegraph.com/rss"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with session.get(url, headers=headers, timeout=10) as response:
+            if response.status != 200:
+                return []
+            xml_data = await response.text()
             
-        cutoff = utc_now().timestamp() - 86400  # 24 hours ago
-        critical_high = []
-        general = []
-        
-        for article in data.get("Data", [])[:40]:
-            published_on = article.get("published_on", 0)
-            if published_on < cutoff:
-                continue
-            
-            title = article.get("title", "")
-            source = article.get("source_info", {}).get("name", "")
-            item = {"title": title, "source": source}
-            
-            importance = classify_news_importance(title)
-            if importance in ("critical", "high"):
-                critical_high.append(item)
-            else:
-                general.append(item)
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(xml_data)
+            channel = root.find('channel')
+            if channel is None:
+                return []
                 
-            if len(critical_high) >= 3:
-                break
-        
-        # Priority: Show critical/high news if found. 
-        # Fallback: Show general news if critical/high list is empty.
-        top_news = critical_high if critical_high else general[:3]
-        return top_news
+            cutoff = utc_now().timestamp() - 86400  # 24 hours ago
+            critical_high = []
+            general = []
+            
+            for item in channel.findall('item')[:40]:
+                pubDate = item.find('pubDate')
+                if pubDate is None:
+                    continue
+                
+                try:
+                    dt = parsedate_to_datetime(pubDate.text)
+                    published_on = dt.timestamp()
+                except:
+                    continue
+                    
+                if published_on < cutoff:
+                    continue
+                
+                title = item.find('title')
+                title_text = title.text if title is not None else ""
+                
+                news_item = {"title": title_text, "source": "CoinTelegraph"}
+                
+                importance = classify_news_importance(title_text)
+                if importance in ("critical", "high"):
+                    critical_high.append(news_item)
+                else:
+                    general.append(news_item)
+                    
+                if len(critical_high) >= 3:
+                    break
+            
+            # Priority: Show critical/high news if found. 
+            # Fallback: Show general news if critical/high list is empty.
+            top_news = critical_high if critical_high else general[:3]
+            return top_news
     except Exception as exc:
         print(f"fetch_top_news error: {exc}")
         return []
@@ -623,28 +642,32 @@ async def fetch_macro_events(session):
             limit_ts = now_ts + 86400  # Next 24 hours
             
             for item in root.findall('event'):
-                impact = item.find('impact').text
-                if impact != 'High':  # We only care about High impact
-                    continue
-                
-                title = item.find('title').text
-                country = item.find('country').text
-                date_str = item.find('date').text
-                time_str = item.find('time').text
-                
                 try:
-                    dt_str = f"{date_str} {time_str}"
+                    impact_node = item.find('impact')
+                    if impact_node is None or impact_node.text != 'High':
+                        continue
+                    
+                    title_node = item.find('title')
+                    country_node = item.find('country')
+                    date_node = item.find('date')
+                    time_node = item.find('time')
+                    
+                    if any(n is None or n.text is None for n in (title_node, country_node, date_node, time_node)):
+                        continue
+                    
+                    dt_str = f"{date_node.text.strip()} {time_node.text.strip()}"
                     event_dt = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p").replace(tzinfo=timezone.utc)
                     event_ts = event_dt.timestamp()
                     
                     if now_ts <= event_ts <= limit_ts:
                         events.append({
-                            "title": title,
-                            "country": country,
+                            "title": title_node.text,
+                            "country": country_node.text,
                             "time": event_dt.strftime("%H:%M UTC"),
                             "timestamp": event_ts
                         })
-                except:
+                except Exception as e:
+                    # Catch per-event errors so one bad item doesn't break the whole list.
                     continue
             return sorted(events, key=lambda x: x['timestamp'])
     except Exception as exc:
@@ -1156,7 +1179,7 @@ async def macro_calendar_loop(session):
         except Exception as exc:
             print(f"Macro Calendar Error: {exc}")
 
-        await asyncio.sleep(3600)  # Check once per hour
+        await asyncio.sleep(300)  # Check every 5 minutes for precise 2-hour alerts
 
 
 async def telegram_long_polling(session):

@@ -146,6 +146,18 @@ def save_rsi_state(state):
         print(f"Error saving RSI state to {RSI_STATE_FILE}: {exc}")
 
 
+def load_news_state():
+    """Load the list of already-sent news article IDs from disk."""
+    path = os.path.join(DATA_DIR, "news_state.json")
+    return read_json_file(path, [])
+
+
+def save_news_state(sent_ids):
+    """Persist sent article IDs, keeping only the last 200 to prevent unbounded growth."""
+    path = os.path.join(DATA_DIR, "news_state.json")
+    write_json_file(path, sent_ids[-200:])
+
+
 def has_sent_digest_today(target_date_str):
     if os.path.exists(LAST_DIGEST_FILE):
         try:
@@ -265,6 +277,26 @@ def classify_bias(text):
     if any(term in lowered for term in negative_terms):
         return "bearish"
     return "neutral"
+
+
+def classify_news_importance(title):
+    """Returns 'critical', 'high', or None based on keywords in the headline."""
+    title_lower = title.lower()
+    critical_keywords = (
+        "hack", "hacked", "exploit", "stolen", "ban", "banned", "arrest",
+        "sec sues", "sec charges", "etf approved", "etf rejected",
+        "collapse", "insolvent", "emergency", "halted",
+    )
+    high_keywords = (
+        "etf", "regulation", "federal reserve", "fed rate", "interest rate",
+        "inflation", "cpi", "powell", "blackrock", "grayscale", "coinbase",
+        "binance", "whale", "all-time high", "ath", "crash", "dump", "pump",
+    )
+    if any(kw in title_lower for kw in critical_keywords):
+        return "critical"
+    if any(kw in title_lower for kw in high_keywords):
+        return "high"
+    return None
 
 
 async def get_market_context(session, symbol):
@@ -429,7 +461,7 @@ def calculate_market_pulse(snapshots, config):
     return {"score": score, "label": label, "watch_next": watch_next}
 
 
-def build_digest_message(snapshots, pulse, config):
+def build_digest_message(snapshots, pulse, config, top_news=None):
     lines = [
         "<b>📰 DAILY MARKET DIGEST</b>",
         f"<b>Time:</b> {html_safe(iso_now())}",
@@ -460,8 +492,43 @@ def build_digest_message(snapshots, pulse, config):
         lines.append(f"- <b>Volume:</b> {html_safe(snapshot['volume_status'])} ({snapshot['volume_delta']:+.1f}% vs average)")
         lines.append("")
 
+    # News section
+    lines.append("<b>📰 Top News (Last 24h)</b>")
+    if top_news:
+        for i, item in enumerate(top_news, 1):
+            lines.append(f"{i}. {html_safe(item['title'])} — <i>{html_safe(item['source'])}</i>")
+    else:
+        lines.append("- No major news detected in the last 24 hours.")
+
+    lines.append("")
     lines.append("<i>Disclaimer: Market analysis only, not financial advice.</i>")
+
     return "\n".join(lines).strip()
+
+
+async def fetch_top_news(session):
+    """Fetch up to 3 critical/high-importance headlines published in the last 24 hours."""
+    try:
+        url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest"
+        data = await fetch_with_backoff(session, url, retries=2)
+        if not data or data.get("Type") != 100:
+            return []
+        cutoff = utc_now().timestamp() - 86400  # 24 hours ago
+        top_news = []
+        for article in data.get("Data", [])[:30]:
+            published_on = article.get("published_on", 0)
+            if published_on < cutoff:
+                continue  # Skip articles older than 24 hours
+            title = article.get("title", "")
+            source = article.get("source_info", {}).get("name", "")
+            if classify_news_importance(title) in ("critical", "high"):
+                top_news.append({"title": title, "source": source})
+            if len(top_news) >= 3:
+                break
+        return top_news
+    except Exception as exc:
+        print(f"fetch_top_news error: {exc}")
+        return []
 
 
 def format_user_label(user_row):
@@ -519,8 +586,9 @@ async def send_daily_digest(session, target_date_str, mark_as_sent=True):
     for symbol in config["digest"]["symbols"]:
         snapshots.append(await fetch_symbol_snapshot(session, symbol))
 
+    top_news = await fetch_top_news(session)
     pulse = calculate_market_pulse(snapshots, config)
-    digest = build_digest_message(snapshots, pulse, config)
+    digest = build_digest_message(snapshots, pulse, config, top_news=top_news)
     sent = await broadcast_message(session, digest)
     database.log_alert("daily_digest", "MULTI", digest, iso_now())
     if mark_as_sent:
@@ -836,6 +904,72 @@ async def handle_admin_command(session, command, args, chat_id):
     await send_telegram_message(session, chat_id, "Unknown admin command. Use /help.")
 
 
+async def news_checker_loop(session):
+    """
+    Checks CryptoCompare for new crypto headlines every 5 minutes.
+    Sends a breaking news alert when a critical or high-importance article
+    is found that has not been sent before.
+    """
+    print("📰 News Checker is Live...")
+    sent_ids = load_news_state()
+
+    while True:
+        try:
+            url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest"
+            data = await fetch_with_backoff(session, url, retries=2)
+
+            if data and data.get("Type") == 100:
+                articles = data.get("Data", [])
+                new_alerts_sent = False
+
+                for article in articles[:20]:
+                    article_id = str(article.get("id", ""))
+                    title = article.get("title", "")
+                    body_snippet = article.get("body", "")[:200]
+                    source = article.get("source_info", {}).get("name", "Unknown Source")
+                    published_on = article.get("published_on", 0)
+
+                    if article_id in sent_ids:
+                        continue
+
+                    # Mark as seen immediately to prevent duplicates
+                    sent_ids.append(article_id)
+
+                    # Skip articles older than 30 minutes — prevents
+                    # flooding subscribers with stale news after a restart
+                    age_seconds = utc_now().timestamp() - published_on
+                    if age_seconds > 1800:
+                        continue
+
+                    importance = classify_news_importance(title)
+                    if importance not in ("critical", "high"):
+                        continue
+
+                    icon = "🔴" if importance == "critical" else "🟠"
+                    alert = (
+                        f"<b>{icon} BREAKING NEWS</b>\n\n"
+                        f"<b>{html_safe(title)}</b>\n\n"
+                        f"<b>Source:</b> {html_safe(source)}\n"
+                        f"<b>Impact:</b> {importance.upper()}\n\n"
+                        f"<i>{html_safe(body_snippet)}...</i>\n\n"
+                        f"<b>Why it matters:</b> Monitor price action closely for any market reaction.\n"
+                        f"<i>Disclaimer: Market analysis only, not financial advice.</i>"
+                    )
+
+                    await broadcast_message(session, alert)
+                    database.log_alert("breaking_news", "MULTI", alert, iso_now())
+                    new_alerts_sent = True
+                    print(f"Breaking news alert sent: {title[:60]}")
+
+                if new_alerts_sent or len(sent_ids) % 50 == 0:
+                    save_news_state(sent_ids)
+
+        except Exception as exc:
+            print(f"News Checker Error: {exc}")
+
+        await asyncio.sleep(300)  # Check every 5 minutes
+
+
 async def telegram_long_polling(session):
     offset = None
     print("🤖 Telegram Polling Engine & Auto-Database is Live...")
@@ -924,6 +1058,7 @@ async def main():
             binance_liquidation_listener(session),
             rsi_scanner_loop(session),
             daily_digest_loop(session),
+            news_checker_loop(session),
         )
 
 

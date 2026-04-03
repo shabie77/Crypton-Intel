@@ -35,6 +35,7 @@ if [[ ! -f "${SHARED_DIR}/.env" ]]; then
   echo "Created ${SHARED_DIR}/.env from template. Edit it before starting the service."
 fi
 
+mkdir -p "${SHARED_DIR}"
 touch "${SHARED_DIR}/subscribers.db"
 
 sudo cp "${APP_ROOT}/deploy/crypto-bot.service" "/etc/systemd/system/${SERVICE_NAME}.service"

@@ -1,4 +1,4 @@
-# Deploy This Telegram Bot To Oracle Cloud With GitHub
+# Deploy This Telegram Bot To Oracle Cloud Or Another Linux VPS
 
 This project is now prepared for a simple flow:
 
@@ -6,6 +6,8 @@ This project is now prepared for a simple flow:
 2. Clone it once on your Oracle Cloud Ubuntu VM
 3. Run the setup script
 4. Let GitHub Actions deploy future pushes automatically
+
+This is the recommended path for the current bot because some Railway regions return `451` from Binance REST, which breaks the richer digest and RSI logic.
 
 ## 1. What to keep out of GitHub
 
@@ -39,6 +41,17 @@ Open inbound rules for:
 - `22` for SSH
 
 You do not need to open a public bot port because this bot uses long polling and outbound API calls.
+
+Before you continue, make sure the server region can reach Binance REST:
+
+```bash
+curl -sS -o /dev/null -w "%{http_code}\n" "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=1"
+```
+
+Expected result:
+
+- `200` means the host can reach Binance normally
+- `451` means the region/provider is blocked for this bot and you should use another VM region or another VPS
 
 ## 4. Connect to the Oracle VM
 
@@ -83,8 +96,16 @@ Use:
 
 ```env
 TELEGRAM_BOT_TOKEN=your_real_bot_token
+ADMIN_USER_ID=your_real_telegram_user_id
+RAILWAY_VOLUME_MOUNT_PATH=/opt/crypto_bot/shared
 DB_FILE=/opt/crypto_bot/shared/subscribers.db
 ```
+
+Notes:
+
+- `ADMIN_USER_ID` must be your Telegram numeric user id
+- `RAILWAY_VOLUME_MOUNT_PATH` keeps the same variable name even on a VPS; here it simply points at the persistent shared folder
+- `DB_FILE` should stay inside the same shared folder so bot state survives deploys and restarts
 
 Then restart:
 
@@ -144,6 +165,8 @@ sudo journalctl -u crypto-bot -n 100 --no-pager
 
 ## Notes specific to this bot
 
-- The SQLite database path is now configurable with `DB_FILE`.
+- The bot now requires `TELEGRAM_BOT_TOKEN`, `ADMIN_USER_ID`, and `RAILWAY_VOLUME_MOUNT_PATH`.
+- The SQLite database path is configurable with `DB_FILE`.
+- On a VPS, use `/opt/crypto_bot/shared` as the persistent data folder.
 - `aiohttp` was added to `requirements.txt` because the bot imports it.
 - The bot can run fine on Linux; the Windows event loop block only applies on Windows.

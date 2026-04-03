@@ -29,17 +29,27 @@ set -a
 source "${SHARED_DIR}/.env"
 set +a
 
+export RAILWAY_VOLUME_MOUNT_PATH="${RAILWAY_VOLUME_MOUNT_PATH:-${SHARED_DIR}}"
+export DB_FILE="${DB_FILE:-${RAILWAY_VOLUME_MOUNT_PATH}/subscribers.db}"
+
 if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || "${TELEGRAM_BOT_TOKEN}" == "replace_with_your_bot_token" ]]; then
   echo "Set a real TELEGRAM_BOT_TOKEN in ${SHARED_DIR}/.env before deploying."
   exit 1
 fi
+
+if [[ -z "${ADMIN_USER_ID:-}" || "${ADMIN_USER_ID}" == "replace_with_your_telegram_user_id" ]]; then
+  echo "Set a real ADMIN_USER_ID in ${SHARED_DIR}/.env before deploying."
+  exit 1
+fi
+
+mkdir -p "${RAILWAY_VOLUME_MOUNT_PATH}"
 
 if [[ ! -L "${APP_ROOT}/crypto_bot/.env" ]]; then
   rm -f "${APP_ROOT}/crypto_bot/.env"
   ln -s "${SHARED_DIR}/.env" "${APP_ROOT}/crypto_bot/.env"
 fi
 
-touch "${SHARED_DIR}/subscribers.db"
+touch "${DB_FILE}"
 
 sudo systemctl daemon-reload
 sudo systemctl restart "${SERVICE_NAME}"

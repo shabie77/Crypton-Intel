@@ -684,8 +684,8 @@ async def _fetch_investing_macro_events(session, timeframe_tab):
         "X-Requested-With": "XMLHttpRequest",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
     }
-    # US(5), EU(72), UK(4), Ger(17), Jpn(12), Aus(25), Can(6), Swz(12)
-    payload = f"country[]=5&country[]=72&country[]=4&country[]=17&country[]=12&country[]=25&country[]=6&timeZone=8&timeFilter=timeOnly&currentTab={timeframe_tab}&submitFilters=1&limit_from=0&importance=3"
+    # US(5), EU(72), UK(4), Ger(17), Jpn(35), Aus(25), Can(6), Swz(12), NZ(43)
+    payload = f"country[]=5&country[]=72&country[]=4&country[]=17&country[]=35&country[]=25&country[]=6&country[]=12&country[]=43&timeZone=8&timeFilter=timeOnly&currentTab={timeframe_tab}&submitFilters=1&limit_from=0&importance=3"
     
     events = []
     print(f"📡 Macro Fetch: Checking {timeframe_tab} via Investing.com API...")

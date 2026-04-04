@@ -536,16 +536,23 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
     # 24h Liquidation Section
     if liq_stats:
         total = liq_stats["total"]
+        if total > 0:
+            long_p = (liq_stats['longs'] / total) * 100
+            short_p = (liq_stats['shorts'] / total) * 100
+            composition = f"<code>{long_p:.1f}% Longs | {short_p:.1f}% Shorts</code>"
+        else:
+            composition = "<code>0% Longs | 0% Shorts</code>"
+
         liq_cfg = config.get("liquidation_settings", DEFAULT_CONFIG["liquidation_settings"])
         status = "NORMAL ⚪"
         if total >= liq_cfg["extreme"]:
             status = "EXTREME 🔴"
         elif total >= liq_cfg["high"]:
             status = "HIGH 🟠"
-            
+
         lines.append("<b>24h Liquidations</b>")
         lines.append(f"- <b>Total:</b> ${total:,.0f} [{status}]")
-        lines.append(f"- <b>Longs:</b> ${liq_stats['longs']:,.0f} | <b>Shorts:</b> ${liq_stats['shorts']:,.0f}")
+        lines.append(f"- <b>Composition:</b> {composition}")
         lines.append("")
 
     if upcoming_macro:

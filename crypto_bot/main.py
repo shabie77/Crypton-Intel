@@ -666,6 +666,77 @@ async def fetch_top_news(session):
         return []
 
 
+async def _fetch_investing_macro_events(session, timeframe_tab):
+    """
+    Fetches high-impact macro events from Investing.com via internal AJAX API.
+    Bypasses the broken ForexFactory Next Week feed.
+    """
+    try:
+        from bs4 import BeautifulSoup
+        import json
+    except ImportError:
+        print("   - ❌ Error: BeautifulSoup4 not installed. Cannot fetch Investing.com data.")
+        return []
+
+    url = "https://www.investing.com/economic-calendar/Service/getCalendarFilteredData"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+    }
+    # US(5), EU(72), UK(4), Ger(17), Jpn(12), Aus(25), Can(6), Swz(12)
+    payload = f"country[]=5&country[]=72&country[]=4&country[]=17&country[]=12&country[]=25&country[]=6&timeZone=8&timeFilter=timeOnly&currentTab={timeframe_tab}&submitFilters=1&limit_from=0&importance=3"
+    
+    events = []
+    print(f"📡 Macro Fetch: Checking {timeframe_tab} via Investing.com API...")
+    try:
+        async with session.post(url, headers=headers, data=payload, timeout=15) as resp:
+            raw_text = await resp.text()
+            try:
+                data = json.loads(raw_text)
+                html = data.get("data", "")
+            except Exception:
+                html = raw_text
+                
+            soup = BeautifulSoup(html, "html.parser")
+            
+            for tr in soup.find_all("tr", class_="js-event-item"):
+                try:
+                    datetime_str = tr.get("data-event-datetime")  # e.g., "2026/04/10 15:30:00"
+                    if not datetime_str: continue
+                    
+                    title_elem = tr.find("td", class_="event")
+                    title = title_elem.text.strip() if title_elem else "Unknown"
+                    title = title.replace("  ", " ").strip()
+                    
+                    country_td = tr.find("td", class_="flagCur")
+                    country = country_td.text.replace('\xa0', '').strip() if country_td else ""
+                    if len(country) > 3: country = country[-3:] # Extract currency ISO
+
+                    sentiment_td = tr.find("td", class_="sentiment")
+                    if sentiment_td and sentiment_td.get("data-img_key") == "bull3":
+                        # Convert datetime string to epoch timestamp (Assuming UTC returned by the API for timezone=8)
+                        # The API returns format: "2026/04/10 15:30:00"
+                        dt = datetime.strptime(datetime_str, "%Y/%m/%d %H:%M:%S")
+                        event_ts = int(dt.replace(tzinfo=timezone.utc).timestamp())
+                        
+                        events.append({
+                            "title": title,
+                            "country": country,
+                            "date": dt.strftime("%m-%d"),
+                            "time": dt.strftime("%H:%M UTC"),
+                            "timestamp": event_ts
+                        })
+                except Exception:
+                    continue
+                    
+        print(f"   - ✅ Success: Extracted {len(events)} High-Impact events from Investing.com.")
+    except Exception as e:
+        print(f"   - ❌ Investing Fetch Error: {e}")
+        
+    return events
+
+
 async def _fetch_all_high_impact_events(session, horizon_days=1):
     """
     Consolidated helper to fetch High Impact events from both current and next week.
@@ -677,19 +748,15 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
     seen_titles = set()
     headers = {"User-Agent": "Mozilla/5.0"}
     
-    # Check both current and next week so weekend rollover still finds upcoming events.
+    # We only use ForexFactory for the current week, as they removed nextweek support.
     feed_targets = [
         {
             "label": "This Week",
             "primaries": ["https://nfs.faireconomy.media/ff_calendar_thisweek.xml"],
             "fallbacks": ["https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.xml"],
-        },
-        {
-            "label": "Next Week",
-            "primaries": ["https://nfs.faireconomy.media/ff_calendar_nextweek.xml"],
-            "fallbacks": ["https://cdn-nfs.faireconomy.media/ff_calendar_nextweek.xml"],
-        },
+        }
     ]
+
 
     import xml.etree.ElementTree as ET
     
@@ -775,11 +842,37 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
             "count": target_event_count,
         }
 
+    # --- Next Week Injection via Investing.com ---
+    # Fetch Next Week data exclusively from Investing.com if requested
+    investing_success = False
+    investing_count = 0
+    if horizon_days > 1:
+        investing_events = await _fetch_investing_macro_events(session, "nextWeek")
+        if investing_events:
+            investing_success = True
+            for ev in investing_events:
+                unique_id = f"{ev['title']}_{ev['timestamp']}"
+                if now_ts <= ev['timestamp'] <= limit_ts and unique_id not in seen_titles:
+                    all_events.append(ev)
+                    seen_titles.add(unique_id)
+                    investing_count += 1
+        
+        target_status["Next Week"] = {
+            "ok": investing_success or (len(investing_events) == 0 and feed_success), 
+            "count": investing_count,
+        }
+
     this_week_ok = target_status.get("This Week", {}).get("ok", False)
     next_week_ok = target_status.get("Next Week", {}).get("ok", False)
     this_week_count = target_status.get("This Week", {}).get("count", 0)
     next_week_count = target_status.get("Next Week", {}).get("count", 0)
-    partial_failure = (this_week_ok or next_week_ok) and not (this_week_ok and next_week_ok)
+    
+    if horizon_days > 1:
+        partial_failure = (this_week_ok or next_week_ok) and not (this_week_ok and next_week_ok)
+    else:
+        partial_failure = not this_week_ok
+    
+    total_successful_feeds += (1 if investing_success else 0)
 
     print(
         "📊 Macro Fetch Summary: "
@@ -789,7 +882,7 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
     )
 
     return {
-        "success": total_successful_feeds > 0,
+        "success": total_successful_feeds > 0 or len(all_events) > 0,
         "partial_failure": partial_failure,
         "this_week_ok": this_week_ok,
         "next_week_ok": next_week_ok,

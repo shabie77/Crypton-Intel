@@ -1320,7 +1320,13 @@ async def macro_calendar_loop(session):
 
     while True:
         try:
-            events = await fetch_macro_events(session)
+            result = await fetch_macro_events(session)
+            if not result["success"]:
+                # Silent skip to avoid log spam, fetcher already prints errors
+                await asyncio.sleep(3600) # Wait longer if feed is down
+                continue
+
+            events = result["events"]
             now_ts = utc_now().timestamp()
             
             for event in events:

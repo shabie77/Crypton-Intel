@@ -313,30 +313,30 @@ def classify_news_importance(title):
     critical_kws = (
         "hack", "exploit", "stolen", "ban", "banned", "arrest", "sec sues", 
         "sec charges", "etf approved", "etf rejected", "collapse", "insolvent", 
-        "emergency", "halted", "binance", "blackrock",
+        "emergency", "halted", "lawsuit", "bankruptcy",
     )
-    high_kws = (
-        "etf", "regulation", "fed rate", "interest rate", "inflation", "cpi", 
-        "powell", "grayscale", "coinbase", "whale", "ath", "crash", "dump", 
-        "pump", "bullish", "bearish",
+    moderate_kws = (
+        "binance", "blackrock", "coinbase", "etf", "regulation", "fed rate", 
+        "interest rate", "inflation", "cpi", "powell", "grayscale", "whale", 
+        "ath", "crash", "dump", "pump", "bullish", "bearish", "market share",
     )
     
     if any(kw in title_lower for kw in critical_kws):
         return {
             "level": "CRITICAL",
             "emoji": "🔴",
-            "impact": "Market-defining regulatory, security, or institutional event."
+            "impact": "Major regulatory development, security breach, or systemic shift."
         }
-    if any(kw in title_lower for kw in high_kws):
+    if any(kw in title_lower for kw in moderate_kws):
         return {
             "level": "MODERATE",
             "emoji": "🟠",
-            "impact": "Significant macro data or trend-shifting market movement."
+            "impact": "Significant market shift, institutional activity, or macro update."
         }
     return {
         "level": "LOW",
         "emoji": "🟡",
-        "impact": "Standard market update or general ecosystem news."
+        "impact": "General ecosystem update or standard market movement."
     }
 
 
@@ -524,8 +524,8 @@ def calculate_market_pulse(snapshots, config):
 
 def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None, macro_partial_failure=False):
     lines = [
-        "<b>📰 DAILY MARKET DIGEST</b>",
-        f"<b>Time:</b> {html_safe(ist_now())}",
+        "📰 <b>DAILY MARKET DIGEST</b>",
+        f"Time: {html_safe(ist_now())}",
         "",
         f"<b>Market Pulse:</b> {pulse['label']} ({pulse['score']}/100)",
         f"<b>Why it matters:</b> {html_safe(config['powell']['stance'].title())} Fed tone and current trend breadth are shaping risk appetite.",
@@ -539,9 +539,9 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
         if total > 0:
             long_p = (liq_stats['longs'] / total) * 100
             short_p = (liq_stats['shorts'] / total) * 100
-            composition = f"<code>{long_p:.1f}% Longs | {short_p:.1f}% Shorts</code>"
+            composition = f"{long_p:.1f}% Longs | {short_p:.1f}% Shorts"
         else:
-            composition = "<code>0% Longs | 0% Shorts</code>"
+            composition = "0% Longs | 0% Shorts"
 
         liq_cfg = config.get("liquidation_settings", DEFAULT_CONFIG["liquidation_settings"])
         status = "NORMAL ⚪"
@@ -551,9 +551,9 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
             status = "HIGH 🟠"
 
         lines.append("<b>24h Liquidations</b>")
-        lines.append(f"- <b>Total:</b> ${total:,.0f} [{status}]")
-        lines.append(f"- <b>Longs:</b> ${liq_stats['longs']:,.0f} | <b>Shorts:</b> ${liq_stats['shorts']:,.0f}")
-        lines.append(f"- <b>Composition:</b> {composition}")
+        lines.append(f"- Total: ${total:,.0f} [{status}]")
+        lines.append(f"- Longs: ${liq_stats['longs']:,.0f} | Shorts: ${liq_stats['shorts']:,.0f}")
+        lines.append(f"- Composition: {composition}")
         lines.append("")
 
     if upcoming_macro:
@@ -573,23 +573,26 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
         
         emoji = "🔼" if snapshot["change_24h"] >= 0 else "🔽"
         lines.append(f"<b>#{html_safe(snapshot['tag'])}</b>: ${snapshot['price']:,.2f} ({emoji} {snapshot['change_24h']:+.2f}% 24h)")
-        lines.append(f"- <b>Trend:</b> {snapshot['trend']} vs 50-day average")
-        lines.append(f"- <b>Daily RSI:</b> {snapshot['rsi']:.1f}")
-        lines.append(f"- <b>Volume:</b> {html_safe(snapshot['volume_status'])} ({snapshot['volume_delta']:+.1f}% vs 20-day avg)")
+        lines.append(f"- Trend: {snapshot['trend']} vs 50-day average")
+        lines.append(f"- Daily RSI: {snapshot['rsi']:.1f}")
+        lines.append(f"- Volume: {html_safe(snapshot['volume_status'])} ({snapshot['volume_delta']:+.1f}% vs 20-day avg)")
         lines.append("")
 
     # News section
-    lines.append("<b>📰 Top News (Last 24h)</b>")
+    lines.append("📰 <b>Top News (Last 24h)</b>")
     if top_news:
         for item in top_news:
             lines.append(f"{item['emoji']} <b>{item['level']}:</b> {html_safe(item['title'])}")
-            lines.append(f"   <b>Source:</b> {html_safe(item['source'])}")
-            lines.append(f"   <b>Impact:</b> {html_safe(item['impact'])}")
+            lines.append(f"   {html_safe(item['impact'])}")
             lines.append("")
     else:
         lines.append("- Market is relatively quiet today.")
+        lines.append("")
 
-    lines.append("<i>Disclaimer: Market analysis only, not financial advice.</i>")
+    lines.append("---")
+    lines.append("(Data Sources: Binance, Trading Economics, CoinTelegraph, CoinGlass)")
+    lines.append("")
+    lines.append("⚠️ <b>Disclaimer:</b> Market analysis only, not financial advice.")
 
     return "\n".join(lines).strip()
 

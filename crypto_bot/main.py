@@ -673,12 +673,18 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
     seen_titles = set()
     headers = {"User-Agent": "Mozilla/5.0"}
     
-    # ForexFactory feed rolls over on Sunday. On Saturdays, we only check the current week.
+    # Check both current and next week so weekend rollover still finds upcoming events.
     feed_targets = [
         {
             "label": "This Week",
-            "primaries": ["https://nfs.faireconomy.media/ff_calendar_thisweek.xml"]
-        }
+            "primaries": ["https://nfs.faireconomy.media/ff_calendar_thisweek.xml"],
+            "fallbacks": ["https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.xml"],
+        },
+        {
+            "label": "Next Week",
+            "primaries": ["https://nfs.faireconomy.media/ff_calendar_nextweek.xml"],
+            "fallbacks": ["https://cdn-nfs.faireconomy.media/ff_calendar_nextweek.xml"],
+        },
     ]
 
     import xml.etree.ElementTree as ET
@@ -688,7 +694,7 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
 
     for target in feed_targets:
         feed_success = False
-        for url in target["primaries"]:
+        for url in (target["primaries"] + target.get("fallbacks", [])):
             print(f"📡 Macro Fetch: Checking {target['label']} via {url}...")
             try:
                 async with session.get(url, headers=headers, timeout=10) as response:
@@ -755,10 +761,13 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
                 print(f"   - ❌ Error: {e}")
                 continue
 
+        if not feed_success:
+            print(f"   - {target['label']} feed unavailable after primary/fallback attempts.")
+
     # Return success = True if at least ONE timeframe feed was successfully processed.
     # This prevents the bot from appearing "down" if only Next Week (404) is unavailable.
     return {
-        "success": total_successful_feeds > 0,
+        "success": bool(all_events) or total_successful_feeds == total_attempted_feeds,
         "events": sorted(all_events, key=lambda x: x['timestamp'])
     }
 

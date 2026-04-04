@@ -676,7 +676,7 @@ async def _fetch_investing_macro_events(session, timeframe_tab):
         import json
     except ImportError:
         print("   - ❌ Error: BeautifulSoup4 not installed. Cannot fetch Investing.com data.")
-        return []
+        return False, []
 
     url = "https://www.investing.com/economic-calendar/Service/getCalendarFilteredData"
     headers = {
@@ -731,10 +731,10 @@ async def _fetch_investing_macro_events(session, timeframe_tab):
                     continue
                     
         print(f"   - ✅ Success: Extracted {len(events)} High-Impact events from Investing.com.")
+        return True, events
     except Exception as e:
         print(f"   - ❌ Investing Fetch Error: {e}")
-        
-    return events
+        return False, []
 
 
 async def _fetch_all_high_impact_events(session, horizon_days=1):
@@ -847,8 +847,8 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
     investing_success = False
     investing_count = 0
     if horizon_days > 1:
-        investing_events = await _fetch_investing_macro_events(session, "nextWeek")
-        if investing_events:
+        success, investing_events = await _fetch_investing_macro_events(session, "nextWeek")
+        if success:
             investing_success = True
             for ev in investing_events:
                 unique_id = f"{ev['title']}_{ev['timestamp']}"
@@ -858,7 +858,7 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
                     investing_count += 1
         
         target_status["Next Week"] = {
-            "ok": investing_success or (len(investing_events) == 0 and feed_success), 
+            "ok": investing_success, 
             "count": investing_count,
         }
 
@@ -868,12 +868,14 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
     next_week_count = target_status.get("Next Week", {}).get("count", 0)
     
     if horizon_days > 1:
+        # For weekly reports, we need both This Week (FF) and Next Week (Investing) to be OK
         partial_failure = (this_week_ok or next_week_ok) and not (this_week_ok and next_week_ok)
+        total_success = this_week_ok and next_week_ok
     else:
+        # For daily reports, we usually only care about the This Week feed
         partial_failure = not this_week_ok
+        total_success = this_week_ok
     
-    total_successful_feeds += (1 if investing_success else 0)
-
     print(
         "📊 Macro Fetch Summary: "
         f"this_week_ok={this_week_ok} count={this_week_count} | "
@@ -882,7 +884,7 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
     )
 
     return {
-        "success": total_successful_feeds > 0 or len(all_events) > 0,
+        "success": total_success,
         "partial_failure": partial_failure,
         "this_week_ok": this_week_ok,
         "next_week_ok": next_week_ok,

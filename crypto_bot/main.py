@@ -308,23 +308,36 @@ def classify_bias(text):
 
 
 def classify_news_importance(title):
-    """Returns 'critical', 'high', or None based on keywords in the headline."""
+    """Returns a dictionary with level, emoji, and a brief impact explanation."""
     title_lower = title.lower()
-    critical_keywords = (
-        "hack", "hacked", "exploit", "stolen", "ban", "banned", "arrest",
-        "sec sues", "sec charges", "etf approved", "etf rejected",
-        "collapse", "insolvent", "emergency", "halted",
+    critical_kws = (
+        "hack", "exploit", "stolen", "ban", "banned", "arrest", "sec sues", 
+        "sec charges", "etf approved", "etf rejected", "collapse", "insolvent", 
+        "emergency", "halted", "binance", "blackrock",
     )
-    high_keywords = (
-        "etf", "regulation", "federal reserve", "fed rate", "interest rate",
-        "inflation", "cpi", "powell", "blackrock", "grayscale", "coinbase",
-        "binance", "whale", "all-time high", "ath", "crash", "dump", "pump",
+    high_kws = (
+        "etf", "regulation", "fed rate", "interest rate", "inflation", "cpi", 
+        "powell", "grayscale", "coinbase", "whale", "ath", "crash", "dump", 
+        "pump", "bullish", "bearish",
     )
-    if any(kw in title_lower for kw in critical_keywords):
-        return "critical"
-    if any(kw in title_lower for kw in high_keywords):
-        return "high"
-    return None
+    
+    if any(kw in title_lower for kw in critical_kws):
+        return {
+            "level": "CRITICAL",
+            "emoji": "🔴",
+            "impact": "Market-defining regulatory, security, or institutional event."
+        }
+    if any(kw in title_lower for kw in high_kws):
+        return {
+            "level": "MODERATE",
+            "emoji": "🟠",
+            "impact": "Significant macro data or trend-shifting market movement."
+        }
+    return {
+        "level": "LOW",
+        "emoji": "🟡",
+        "impact": "Standard market update or general ecosystem news."
+    }
 
 
 async def get_market_context(session, symbol):
@@ -411,14 +424,15 @@ async def fetch_symbol_snapshot(session, symbol, config):
     previous_price = close_prices[-2] if len(close_prices) > 1 else current_price
     sma_50 = sum(close_prices) / len(close_prices)
     rsi = calculate_rsi(close_prices)
-    current_volume = volumes[-1]
     
-    # 20-day Moving Average (last 20 days)
+    # Yesterday's Completed Volume vs 20-day Moving Average (last 20 days)
+    # Binary: volumes[-1] is UNFINISHED TODAY. volumes[-2] is COMPLETED YESTERDAY.
+    current_volume = volumes[-2] 
     ma_period = 20
-    recent_volumes = volumes[-ma_period:]
+    recent_volumes = volumes[-ma_period-1:-1] # The 20 bars BEFORE today
     average_volume = sum(recent_volumes) / max(len(recent_volumes), 1)
     
-    # Calculate: (current_volume / 20-day MA) * 100
+    # Calculate: (Yesterday's volume / 20-day MA) * 100
     volume_ratio = current_volume / average_volume if average_volume else 1.0
     volume_percent = volume_ratio * 100
     volume_delta = (volume_ratio - 1) * 100
@@ -462,19 +476,21 @@ def calculate_market_pulse(snapshots, config):
             score += 8
             bullish_count += 1
         else:
-            score -= 8
+            # Bearish trend is heavily weighted during crashes
+            score -= 12
             bearish_count += 1
 
         if snapshot["rsi"] >= 65:
             score += 5
         elif snapshot["rsi"] <= 35:
-            score -= 5
+            # Low RSI (Fear) gets higher penalty
+            score -= 10
 
         if snapshot["change_24h"] >= 2:
             score += 4
         elif snapshot["change_24h"] <= -2:
-            score -= 4
-
+            score -= 6
+            
     powell_score = int(config["powell"]["score"])
     score += (3 - powell_score) * 4
 
@@ -553,12 +569,14 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
     # News section
     lines.append("<b>📰 Top News (Last 24h)</b>")
     if top_news:
-        for i, item in enumerate(top_news, 1):
-            lines.append(f"{i}. {html_safe(item['title'])} — <i>{html_safe(item['source'])}</i>")
+        for item in top_news:
+            lines.append(f"{item['emoji']} <b>{item['level']}:</b> {html_safe(item['title'])}")
+            lines.append(f"   <b>Source:</b> {html_safe(item['source'])}")
+            lines.append(f"   <b>Impact:</b> {html_safe(item['impact'])}")
+            lines.append("")
     else:
         lines.append("- Market is relatively quiet today.")
 
-    lines.append("")
     lines.append("<i>Disclaimer: Market analysis only, not financial advice.</i>")
 
     return "\n".join(lines).strip()
@@ -605,10 +623,16 @@ async def fetch_top_news(session):
                 title = item.find('title')
                 title_text = title.text if title is not None else ""
                 
-                news_item = {"title": title_text, "source": "CoinTelegraph"}
+                importance_data = classify_news_importance(title_text)
+                news_item = {
+                    "title": title_text,
+                    "source": "CoinTelegraph",
+                    "level": importance_data["level"],
+                    "emoji": importance_data["emoji"],
+                    "impact": importance_data["impact"]
+                }
                 
-                importance = classify_news_importance(title_text)
-                if importance in ("critical", "high"):
+                if importance_data["level"] in ("CRITICAL", "MODERATE"):
                     critical_high.append(news_item)
                 else:
                     general.append(news_item)
@@ -616,10 +640,15 @@ async def fetch_top_news(session):
                 if len(critical_high) >= 3:
                     break
             
-            # Priority: Show critical/high news if found. 
-            # Fallback: Show general news if critical/high list is empty.
-            top_news = critical_high if critical_high else general[:3]
-            return top_news
+            # Sort top news by severity (CRITICAL first)
+            # Use numeric ranking to avoid alphabetical sorting issues (M > C)
+            SEVERITY_RANK = {"CRITICAL": 3, "MODERATE": 2, "LOW": 1}
+            final_news = sorted(
+                critical_high + general[:3], 
+                key=lambda x: SEVERITY_RANK.get(x["level"], 0), 
+                reverse=True
+            )
+            return final_news[:5] # Max 5 for digest balance
     except Exception as exc:
         print(f"fetch_top_news error: {exc}")
         return []
@@ -628,8 +657,9 @@ async def fetch_top_news(session):
 async def fetch_macro_events(session):
     """Fetch high-impact economic events for the next 24 hours."""
     try:
-        url = "https://www.forexfactory.com/ff_calendar_thisweek.xml"
-        async with session.get(url, timeout=10) as response:
+        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with session.get(url, headers=headers, timeout=10) as response:
             if response.status != 200:
                 return []
             xml_data = await response.text()
@@ -644,7 +674,7 @@ async def fetch_macro_events(session):
             for item in root.findall('event'):
                 try:
                     impact_node = item.find('impact')
-                    if impact_node is None or impact_node.text != 'High':
+                    if impact_node is None or impact_node.text.strip() != 'High':
                         continue
                     
                     title_node = item.find('title')
@@ -661,17 +691,66 @@ async def fetch_macro_events(session):
                     
                     if now_ts <= event_ts <= limit_ts:
                         events.append({
-                            "title": title_node.text,
-                            "country": country_node.text,
+                            "title": title_node.text.strip(),
+                            "country": country_node.text.strip(),
                             "time": event_dt.strftime("%H:%M UTC"),
                             "timestamp": event_ts
                         })
-                except Exception as e:
-                    # Catch per-event errors so one bad item doesn't break the whole list.
+                except:
                     continue
             return sorted(events, key=lambda x: x['timestamp'])
     except Exception as exc:
         print(f"fetch_macro_events error: {exc}")
+        return []
+
+async def fetch_weekly_macro_events(session):
+    """Fetch high-impact economic events for the next 7 days (Admin Audit)."""
+    try:
+        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with session.get(url, headers=headers, timeout=10) as response:
+            if response.status != 200:
+                return []
+            xml_data = await response.text()
+            
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(xml_data)
+            
+            events = []
+            now_ts = utc_now().timestamp()
+            limit_ts = now_ts + (86400 * 7)  # Next 7 days
+            
+            for item in root.findall('event'):
+                try:
+                    impact_node = item.find('impact')
+                    if impact_node is None or impact_node.text.strip() != 'High':
+                        continue
+                    
+                    title_node = item.find('title')
+                    country_node = item.find('country')
+                    date_node = item.find('date')
+                    time_node = item.find('time')
+                    
+                    if any(n is None or n.text is None for n in (title_node, country_node, date_node, time_node)):
+                        continue
+                    
+                    dt_str = f"{date_node.text.strip()} {time_node.text.strip()}"
+                    event_dt = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p").replace(tzinfo=timezone.utc)
+                    event_ts = event_dt.timestamp()
+                    
+                    if now_ts <= event_ts <= limit_ts:
+                        events.append({
+                            "title": title_node.text.strip(),
+                            "country": country_node.text.strip(),
+                            "date": date_node.text.strip(),
+                            "time": time_node.text.strip(),
+                            "timestamp": event_ts
+                        })
+                except:
+                    continue
+            return sorted(events, key=lambda x: x['timestamp'])
+    except Exception as exc:
+        print(f"fetch_weekly_macro_events error: {exc}")
         return []
 
 
@@ -947,6 +1026,21 @@ async def handle_admin_command(session, command, args, chat_id):
         await send_telegram_message(session, chat_id, f"Broadcast delivered to {sent} recipients.")
         return
 
+    if command == "/macro":
+        events = await fetch_weekly_macro_events(session)
+        if not events:
+            await send_telegram_message(session, chat_id, "📅 No High Impact macro events found for the next 7 days.")
+            return
+            
+        lines = ["<b>📅 WEEKLY MACRO AUDIT (High Impact)</b>", ""]
+        for e in events:
+            lines.append(f"• <code>{e['date']} {e['time']}</code>")
+            lines.append(f"  <b>{html_safe(e['title'])}</b> ({e['country']})")
+            lines.append("")
+        
+        await send_telegram_message(session, chat_id, f"Audit report:\n" + "\n".join(lines))
+        return
+
     if command == "/update_powell":
         parts = args.split(" ", 2)
         if len(parts) < 3:
@@ -1110,18 +1204,18 @@ async def news_checker_loop(session):
                     if age_seconds > 1800:
                         continue
 
-                    importance = classify_news_importance(title)
-                    if importance not in ("critical", "high"):
+                    importance_data = classify_news_importance(title)
+                    if importance_data["level"] not in ("CRITICAL", "MODERATE"):
                         continue
 
-                    icon = "🔴" if importance == "critical" else "🟠"
+                    icon = importance_data["emoji"]
                     alert = (
                         f"<b>{icon} BREAKING NEWS</b>\n\n"
                         f"<b>{html_safe(title)}</b>\n\n"
                         f"<b>Source:</b> {html_safe(source)}\n"
-                        f"<b>Impact:</b> {importance.upper()}\n\n"
+                        f"<b>Impact:</b> {importance_data['level']}\n\n"
                         f"<i>{html_safe(body_snippet)}...</i>\n\n"
-                        f"<b>Why it matters:</b> Monitor price action closely for any market reaction.\n"
+                        f"<b>Why it matters:</b> {importance_data['impact']}\n\n"
                         f"<i>Disclaimer: Market analysis only, not financial advice.</i>"
                     )
 

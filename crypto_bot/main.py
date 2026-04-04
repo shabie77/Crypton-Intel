@@ -984,7 +984,8 @@ async def send_daily_digest(session, target_date_str, mark_as_sent=True):
     top_news = await fetch_top_news(session)
     # Fetch 24h Macro Events
     macro_data = await fetch_macro_events(session)
-    upcoming_macro = macro_data["events"] if macro_data["success"] else []
+    # Always use events if they exist, regardless of overall success flag
+    upcoming_macro = macro_data["events"] if macro_data.get("events") else []
     
     # Fetch 24h Liquidation Stats
     cutoff_iso = (utc_now() - timedelta(hours=24)).isoformat()
@@ -1249,19 +1250,32 @@ async def handle_admin_command(session, command, args, chat_id):
 
     if command == "/macro":
         result = await fetch_weekly_macro_events(session)
-        if not result["success"]:
+        events = result.get("events", [])
+        this_week_ok = result.get("this_week_ok", False)
+        next_week_ok = result.get("next_week_ok", False)
+        partial_failure = result.get("partial_failure", False)
+
+        # Case 1: Both sources failed AND no events at all
+        if not this_week_ok and not next_week_ok and not events:
             await send_telegram_message(session, chat_id, "⚠️ Macro calendar feed unavailable right now. Please try again later.")
             return
 
-        events = result["events"]
-        if not events and result.get("partial_failure"):
-            await send_telegram_message(session, chat_id, "⚠️ Next-week macro source unavailable right now. Please try again later.")
-            return
-        if not events:
+        # Case 2: Both sources succeeded but truly no events
+        if this_week_ok and next_week_ok and not events:
             await send_telegram_message(session, chat_id, "📅 No High Impact macro events found for the next 7 days.")
             return
-            
+
+        # Case 3: No events but partial failure (one source down)
+        if not events and partial_failure:
+            source_down = "Current-week" if not this_week_ok else "Next-week"
+            await send_telegram_message(session, chat_id, f"⚠️ {source_down} macro source unavailable right now. No events from the working source either. Try again later.")
+            return
+
+        # Case 4: Events exist — always show them, with warning if partial failure
         lines = ["<b>📅 WEEKLY MACRO AUDIT (High Impact)</b>", ""]
+        if partial_failure:
+            source_down = "Current-week" if not this_week_ok else "Next-week"
+            lines.insert(0, f"⚠️ {source_down} macro source partially unavailable. Showing available events.\n")
         for e in events:
             lines.append(f"• <code>{e['date']} {e['time']}</code>")
             lines.append(f"  <b>{html_safe(e['title'])}</b> ({e['country']})")

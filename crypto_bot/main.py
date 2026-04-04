@@ -552,6 +552,7 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
 
         lines.append("<b>24h Liquidations</b>")
         lines.append(f"- <b>Total:</b> ${total:,.0f} [{status}]")
+        lines.append(f"- <b>Longs:</b> ${liq_stats['longs']:,.0f} | <b>Shorts:</b> ${liq_stats['shorts']:,.0f}")
         lines.append(f"- <b>Composition:</b> {composition}")
         lines.append("")
 
@@ -655,110 +656,85 @@ async def fetch_top_news(session):
                 key=lambda x: SEVERITY_RANK.get(x["level"], 0), 
                 reverse=True
             )
-            return final_news[:5] # Max 5 for digest balance
+            return final_news[:3] # Strictly Top 3 news items
     except Exception as exc:
         print(f"fetch_top_news error: {exc}")
         return []
 
 
-async def fetch_macro_events(session):
-    """Fetch high-impact economic events for the next 24 hours."""
+async def _fetch_all_high_impact_events(session, horizon_days=1):
+    """
+    Consolidated helper to fetch High Impact events from both current and next week.
+    Handles deduplication and sorting.
+    """
     try:
-        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
+        urls = [
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.xml",
+            "https://nfs.faireconomy.media/ff_calendar_nextweek.xml"
+        ]
+        
+        all_events = []
+        now_ts = utc_now().timestamp()
+        limit_ts = now_ts + (86400 * horizon_days)
+        seen_titles = set()
         headers = {"User-Agent": "Mozilla/5.0"}
-        async with session.get(url, headers=headers, timeout=10) as response:
-            if response.status != 200:
-                return []
-            xml_data = await response.text()
-            
-            import xml.etree.ElementTree as ET
-            root = ET.fromstring(xml_data)
-            
-            events = []
-            now_ts = utc_now().timestamp()
-            limit_ts = now_ts + 86400  # Next 24 hours
-            
-            for item in root.findall('event'):
-                try:
-                    impact_node = item.find('impact')
-                    if impact_node is None or impact_node.text.strip() != 'High':
+
+        import xml.etree.ElementTree as ET
+        
+        for url in urls:
+            try:
+                async with session.get(url, headers=headers, timeout=10) as response:
+                    if response.status != 200:
                         continue
+                    xml_data = await response.text()
+                    root = ET.fromstring(xml_data)
                     
-                    title_node = item.find('title')
-                    country_node = item.find('country')
-                    date_node = item.find('date')
-                    time_node = item.find('time')
-                    
-                    if any(n is None or n.text is None for n in (title_node, country_node, date_node, time_node)):
-                        continue
-                    
-                    dt_str = f"{date_node.text.strip()} {time_node.text.strip()}"
-                    event_dt = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p").replace(tzinfo=timezone.utc)
-                    event_ts = event_dt.timestamp()
-                    
-                    if now_ts <= event_ts <= limit_ts:
-                        events.append({
-                            "title": title_node.text.strip(),
-                            "country": country_node.text.strip(),
-                            "time": event_dt.strftime("%H:%M UTC"),
-                            "timestamp": event_ts
-                        })
-                except:
-                    continue
-            return sorted(events, key=lambda x: x['timestamp'])
+                    for item in root.findall('event'):
+                        impact_node = item.find('impact')
+                        if impact_node is None or impact_node.text.strip() != 'High':
+                            continue
+                        
+                        title_node = item.find('title')
+                        country_node = item.find('country')
+                        date_node = item.find('date')
+                        time_node = item.find('time')
+                        
+                        if any(n is None or n.text is None for n in (title_node, country_node, date_node, time_node)):
+                            continue
+                        
+                        dt_str = f"{date_node.text.strip()} {time_node.text.strip()}"
+                        event_dt = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p").replace(tzinfo=timezone.utc)
+                        event_ts = event_dt.timestamp()
+                        
+                        # Deduplication key
+                        unique_id = f"{title_node.text.strip()}_{event_ts}"
+                        
+                        if now_ts <= event_ts <= limit_ts and unique_id not in seen_titles:
+                            all_events.append({
+                                "title": title_node.text.strip(),
+                                "country": country_node.text.strip(),
+                                "time": event_dt.strftime("%H:%M UTC"),
+                                "timestamp": event_ts
+                            })
+                            seen_titles.add(unique_id)
+            except:
+                continue # Skip failing URLs
+
+        return sorted(all_events, key=lambda x: x['timestamp'])
     except Exception as exc:
-        print(f"fetch_macro_events error: {exc}")
+        print(f"macro_fetch_helper error: {exc}")
         return []
+
+
+async def fetch_macro_events(session):
+    """Fetch high-impact economic events for the next 24 hours (Daily Digest)."""
+    return await _fetch_all_high_impact_events(session, horizon_days=1)
+
 
 async def fetch_weekly_macro_events(session):
     """Fetch high-impact economic events for the next 7 days (Admin Audit)."""
-    try:
-        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with session.get(url, headers=headers, timeout=10) as response:
-            if response.status != 200:
-                return []
-            xml_data = await response.text()
-            
-            import xml.etree.ElementTree as ET
-            root = ET.fromstring(xml_data)
-            
-            events = []
-            now_ts = utc_now().timestamp()
-            limit_ts = now_ts + (86400 * 7)  # Next 7 days
-            
-            for item in root.findall('event'):
-                try:
-                    impact_node = item.find('impact')
-                    if impact_node is None or impact_node.text.strip() != 'High':
-                        continue
-                    
-                    title_node = item.find('title')
-                    country_node = item.find('country')
-                    date_node = item.find('date')
-                    time_node = item.find('time')
-                    
-                    if any(n is None or n.text is None for n in (title_node, country_node, date_node, time_node)):
-                        continue
-                    
-                    dt_str = f"{date_node.text.strip()} {time_node.text.strip()}"
-                    event_dt = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p").replace(tzinfo=timezone.utc)
-                    event_ts = event_dt.timestamp()
-                    
-                    if now_ts <= event_ts <= limit_ts:
-                        events.append({
-                            "title": title_node.text.strip(),
-                            "country": country_node.text.strip(),
-                            "date": date_node.text.strip(),
-                            "time": time_node.text.strip(),
-                            "timestamp": event_ts
-                        })
-                except:
-                    continue
-            return sorted(events, key=lambda x: x['timestamp'])
-    except Exception as exc:
-        print(f"fetch_weekly_macro_events error: {exc}")
-        return []
+    return await _fetch_all_high_impact_events(session, horizon_days=7)
+
 
 
 def format_user_label(user_row):
@@ -941,69 +917,115 @@ async def daily_digest_loop(session):
 
 
 async def binance_liquidation_listener(session):
-    url = "wss://fstream.binance.com/stream?streams=btcusdt@forceOrder/ethusdt@forceOrder/solusdt@forceOrder"
-    print("📡 Connecting to Binance WebSocket for Premium Top 3 Coins (BTC, ETH, SOL)...")
+    """
+    Connects to the Binance Aggregated Force Order stream (!forceOrder@arr).
+    Captures ALL symbols market-wide for the $200M+ accurate totals.
+    Real-time alerts remain scoped to your tracked coins.
+    
+    Reliability: Retries exponentially and alerts Admin if failure persists.
+    """
+    print("💧 Market-Wide Liquidation Engine is Live...")
+    url = "wss://fstream.binance.com/ws/!forceOrder@arr"
 
     retry_count = 0
     while True:
         try:
+            config = await load_config()
+            tracked_coins = config.get("tracked_coins", DEFAULT_CONFIG["tracked_coins"])
+            
             async with websockets.connect(url, ping_interval=20, ping_timeout=20, close_timeout=10) as websocket:
-                print("✅ Connected to Premium Binance WebSocket successfully!")
-                retry_count = 0  # Reset counter on success
+                print("✅ Connected to Market-Wide WebSocket successfully!")
+                retry_count = 0  # Reset on success
                 while True:
                     response = await websocket.recv()
                     payload = json.loads(response)
-                    data = payload.get("data", {})
-                    order_data = data.get("o", {})
-                    if not order_data:
-                        continue
-
-                    symbol = order_data["s"]
-                    side = order_data["S"]
-                    price = float(order_data["p"])
-                    qty = float(order_data["q"])
-                    total_value = price * qty
                     
-                    # Store liquidation for 24h stats
-                    database.log_liquidation(symbol, side, total_value, iso_now())
+                    # Binance !forceOrder@arr returns an array of events
+                    data_list = payload if isinstance(payload, list) else [payload]
 
-                    if total_value <= 50000:
-                        continue
+                    for event in data_list:
+                        order_data = event.get("o", {})
+                        if not order_data:
+                            continue
 
-                    position_type = "SHORT 🔴" if side == "BUY" else "LONG 🟢"
-                    trend, _ = await get_market_context(session, symbol)
-                    _, confidence, insight = await calculate_confluence_score(total_value, side, trend)
+                        symbol = order_data["s"].replace("USDT", "")
+                        side = order_data["S"]
+                        price = float(order_data["p"])
+                        qty = float(order_data["q"])
+                        total_value = price * qty
+                        
+                        # Store EVERYTHING for global market accuracy
+                        database.log_liquidation(symbol, side, total_value, iso_now())
 
-                    if confidence <= 40:
-                        print(f"Filtered out {symbol} Signal: {confidence}% (Too noisy)")
-                        continue
+                        # Alert logic for specific coins only
+                        if symbol in tracked_coins and total_value > 50000:
+                            position_type = "SHORT 🔴" if side == "BUY" else "LONG 🟢"
+                            trend, _ = await get_market_context(session, symbol)
+                            _, confidence, insight = await calculate_confluence_score(total_value, side, trend)
 
-                    alert_message = (
-                        f"<b>🚀 PREMIUM LIQUIDATION SIGNAL</b>\n\n"
-                        f"<b>Asset:</b> #{pair_to_tag(symbol)}\n"
-                        f"<b>Liquidation:</b> {position_type}\n"
-                        f"<b>Value:</b> ${total_value:,.2f}\n"
-                        f"<b>Trend:</b> {trend}\n"
-                        f"<b>Signal Confidence:</b> {confidence}%\n\n"
-                        f"<b>Intelligence Layer:</b> {insight}\n\n"
-                        f"<i>Disclaimer: Market analysis only, not financial advice.</i>"
-                    )
-
-                    await broadcast_message(session, alert_message)
-                    database.log_alert("liquidation", symbol, alert_message, iso_now())
-                    print(f"Liquid alert sent: {symbol} ${total_value:,.0f}")
+                            if confidence > 40:
+                                alert_message = (
+                                    f"<b>🚀 PREMIUM LIQUIDATION SIGNAL</b>\n\n"
+                                    f"<b>Asset:</b> #{pair_to_tag(symbol)}\n"
+                                    f"<b>Liquidation:</b> {position_type}\n"
+                                    f"<b>Value:</b> ${total_value:,.2f}\n"
+                                    f"<b>Trend:</b> {trend}\n"
+                                    f"<b>Signal Confidence:</b> {confidence}%\n\n"
+                                    f"<b>Intelligence Layer:</b> {insight}\n\n"
+                                    f"<i>Disclaimer: Market analysis only, not financial advice.</i>"
+                                )
+                                await broadcast_message(session, alert_message)
+                                database.log_alert("liquidation", symbol, alert_message, iso_now())
 
         except Exception as exc:
             retry_count += 1
-            print(f"Binance WebSocket Error (Attempt {retry_count}): {exc}")
+            print(f"Market-Wide WebSocket Error (Attempt {retry_count}): {exc}")
             
             if retry_count == 3:
-                admin_msg = f"⚠️ <b>CRITICAL ALERT</b>\n\nBinance Liquidation WebSocket failed to reconnect after 3 attempts.\nError: {html_safe(exc)}"
-                await send_telegram_message(session, ADMIN_USER_ID, admin_msg)
+                admin_alert = (
+                    f"⚠️ <b>CRITICAL ALERT</b>\n\n"
+                    f"Binance Market-Wide Liquidation WebSocket failed to reconnect after 3 attempts.\n"
+                    f"<b>Error:</b> {html_safe(str(exc))}"
+                )
+                await send_telegram_message(session, ADMIN_USER_ID, admin_alert)
                 print("Admin alerted about WebSocket failure.")
-            
-            sleep_time = min(60, 5 * retry_count) # Backoff up to 60s
+
+            # Backoff sleep before retrying
+            sleep_time = min(60, 5 * retry_count)
             await asyncio.sleep(sleep_time)
+
+
+
+async def register_admin_commands(session):
+    """Registers commands with Telegram so they appear in the menu button."""
+    url = f"{TELEGRAM_API_URL}/setMyCommands"
+    
+    # Common commands for everyone
+    common_commands = [
+        {"command": "start", "description": "Register for alerts"},
+        {"command": "help", "description": "Show command list"},
+        {"command": "digest", "description": "Get latest market digest"}
+    ]
+    
+    # Admin-only commands (Scoped to ADMIN_USER_ID)
+    admin_only = common_commands + [
+        {"command": "status", "description": "Show bot health"},
+        {"command": "macro", "description": "Audit upcoming macro events"},
+        {"command": "channels", "description": "List active channels"},
+        {"command": "users", "description": "List active DM users"}
+    ]
+
+    try:
+        # 1. Set global commands
+        await session.post(url, json={"commands": common_commands})
+        
+        # 2. Set admin-specific commands
+        admin_scope = {"type": "chat", "chat_id": str(ADMIN_USER_ID)}
+        await session.post(url, json={"commands": admin_only, "scope": admin_scope})
+        
+        print("✅ Telegram Command Menu synchronized (Admin Scope included).")
+    except Exception as exc:
+        print(f"Error registering commands: {exc}")
 
 
 async def handle_admin_command(session, command, args, chat_id):
@@ -1366,6 +1388,9 @@ async def main():
     await load_config()
     connector = aiohttp.TCPConnector(keepalive_timeout=60)
     async with aiohttp.ClientSession(connector=connector) as session:
+        # Sync Telegram menu commands
+        await register_admin_commands(session)
+        
         await asyncio.gather(
             telegram_long_polling(session),
             binance_liquidation_listener(session),

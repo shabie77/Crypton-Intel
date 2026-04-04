@@ -673,15 +673,11 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
     seen_titles = set()
     headers = {"User-Agent": "Mozilla/5.0"}
     
-    # We check both this week and next week to avoid weekend blind spots.
+    # ForexFactory feed rolls over on Sunday. On Saturdays, we only check the current week.
     feed_targets = [
         {
             "label": "This Week",
             "primaries": ["https://nfs.faireconomy.media/ff_calendar_thisweek.xml"]
-        },
-        {
-            "label": "Next Week",
-            "primaries": ["https://nfs.faireconomy.media/ff_calendar_nextweek.xml"]
         }
     ]
 
@@ -747,10 +743,14 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
                             seen_titles.add(unique_id)
                             events_in_this_feed += 1
 
-                    print(f"   - ✅ Success: Extracted {events_in_this_feed} unique High-Impact events.")
+                    if events_in_this_feed > 0:
+                        print(f"   - ✅ Success: Extracted {events_in_this_feed} unique High-Impact events.")
+                    else:
+                        print(f"   - 💡 Note: No future High-Impact events found (Weekend Rollover Mode).")
+                    
                     feed_success = True
                     total_successful_feeds += 1
-                    break # Success on this timeframe, don't try fallbacks
+                    break 
             except Exception as e:
                 print(f"   - ❌ Error: {e}")
                 continue

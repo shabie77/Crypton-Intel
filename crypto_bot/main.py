@@ -1154,24 +1154,29 @@ async def binance_liquidation_listener(session):
                         database.log_liquidation(symbol, side, total_value, iso_now())
 
                         # Alert logic for specific coins only
-                        if symbol in tracked_coins and total_value > 50000:
-                            position_type = "SHORT 🔴" if side == "BUY" else "LONG 🟢"
-                            trend, _ = await get_market_context(session, symbol)
-                            _, confidence, insight = await calculate_confluence_score(total_value, side, trend)
+                        if symbol in tracked_coins:
+                            # BTC/ETH (Majors) = 50k, others (Beta) = 25k
+                            min_value = 50000 if symbol in ["BTC", "ETH"] else 25000
+                            
+                            if total_value >= min_value:
+                                position_type = "SHORT 🔴" if side == "BUY" else "LONG 🟢"
+                                trend, _ = await get_market_context(session, symbol)
+                                _, confidence, insight = await calculate_confluence_score(total_value, side, trend)
 
-                            if confidence > 40:
-                                alert_message = (
-                                    f"<b>🚀 PREMIUM LIQUIDATION SIGNAL</b>\n\n"
-                                    f"<b>Asset:</b> #{pair_to_tag(symbol)}\n"
-                                    f"<b>Liquidation:</b> {position_type}\n"
-                                    f"<b>Value:</b> ${total_value:,.2f}\n"
-                                    f"<b>Trend:</b> {trend}\n"
-                                    f"<b>Signal Confidence:</b> {confidence}%\n\n"
-                                    f"<b>Intelligence Layer:</b> {insight}\n\n"
-                                    f"<i>Disclaimer: Market analysis only, not financial advice.</i>"
-                                )
-                                await broadcast_message(session, alert_message)
-                                database.log_alert("liquidation", symbol, alert_message, iso_now())
+                                # Reduced from 40 to 30 as requested
+                                if confidence >= 30:
+                                    alert_message = (
+                                        f"<b>🚀 PREMIUM LIQUIDATION SIGNAL</b>\n\n"
+                                        f"<b>Asset:</b> #{pair_to_tag(symbol)}\n"
+                                        f"<b>Liquidation:</b> {position_type}\n"
+                                        f"<b>Value:</b> ${total_value:,.2f}\n"
+                                        f"<b>Trend:</b> {trend}\n"
+                                        f"<b>Signal Confidence:</b> {confidence}%\n\n"
+                                        f"<b>Intelligence Layer:</b> {insight}\n\n"
+                                        f"<i>Disclaimer: Market analysis only, not financial advice.</i>"
+                                    )
+                                    await broadcast_message(session, alert_message)
+                                    database.log_alert("liquidation", symbol, alert_message, iso_now())
 
         except Exception as exc:
             retry_count += 1

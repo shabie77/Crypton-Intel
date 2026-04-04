@@ -673,18 +673,15 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
     seen_titles = set()
     headers = {"User-Agent": "Mozilla/5.0"}
     
-    # We want to check both this week and next week to avoid weekend blind spots.
-    # For each, we have a primary and fallback URL.
+    # We check both this week and next week to avoid weekend blind spots.
     feed_targets = [
         {
             "label": "This Week",
-            "primaries": ["https://nfs.faireconomy.media/ff_calendar_thisweek.xml"],
-            "fallbacks": ["https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.xml"]
+            "primaries": ["https://nfs.faireconomy.media/ff_calendar_thisweek.xml"]
         },
         {
             "label": "Next Week",
-            "primaries": ["https://nfs.faireconomy.media/ff_calendar_nextweek.xml"],
-            "fallbacks": ["https://cdn-nfs.faireconomy.media/ff_calendar_nextweek.xml"]
+            "primaries": ["https://nfs.faireconomy.media/ff_calendar_nextweek.xml"]
         }
     ]
 
@@ -695,8 +692,7 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
 
     for target in feed_targets:
         feed_success = False
-        # Try primaries first, then fallbacks
-        for url in (target["primaries"] + target["fallbacks"]):
+        for url in target["primaries"]:
             print(f"📡 Macro Fetch: Checking {target['label']} via {url}...")
             try:
                 async with session.get(url, headers=headers, timeout=10) as response:
@@ -759,11 +755,10 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
                 print(f"   - ❌ Error: {e}")
                 continue
 
-    # Return success = True only if EVERY timeframe target was successfully processed.
-    # If a timeframe is requested (Current or Next Week) and both primary/fallback fail, 
-    # we report success = False to warn that the data is incomplete.
+    # Return success = True if at least ONE timeframe feed was successfully processed.
+    # This prevents the bot from appearing "down" if only Next Week (404) is unavailable.
     return {
-        "success": total_successful_feeds == len(feed_targets),
+        "success": total_successful_feeds > 0,
         "events": sorted(all_events, key=lambda x: x['timestamp'])
     }
 

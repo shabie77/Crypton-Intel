@@ -759,10 +759,11 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
                 print(f"   - ❌ Error: {e}")
                 continue
 
-    # Return success = True if at least one timeframe feed was successfully processed.
-    # If all feeds (This Week AND Next Week) failed, we signal a failure.
+    # Return success = True only if EVERY timeframe target was successfully processed.
+    # If a timeframe is requested (Current or Next Week) and both primary/fallback fail, 
+    # we report success = False to warn that the data is incomplete.
     return {
-        "success": total_successful_feeds > 0,
+        "success": total_successful_feeds == len(feed_targets),
         "events": sorted(all_events, key=lambda x: x['timestamp'])
     }
 
@@ -1354,7 +1355,9 @@ async def macro_calendar_loop(session):
                     print(f"Macro warning sent: {event['title']}")
                     
         except Exception as exc:
+            import traceback
             print(f"Macro Calendar Error: {exc}")
+            print(traceback.format_exc())
 
         await asyncio.sleep(300)  # Check every 5 minutes for precise 2-hour alerts
 

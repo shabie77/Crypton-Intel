@@ -691,16 +691,41 @@ async def _fetch_investing_macro_events(session, timeframe_tab):
     print(f"📡 Macro Fetch: Checking {timeframe_tab} via Investing.com API...")
     try:
         async with session.post(url, headers=headers, data=payload, timeout=15) as resp:
+            content_type = resp.headers.get("Content-Type", "").lower()
+            print(f"   - Status: {resp.status} | Content-Type: {content_type}")
+            
+            if resp.status != 200:
+                print(f"   - ❌ Error: Investing API returned non-200 status ({resp.status}).")
+                return False, []
+                
             raw_text = await resp.text()
+            html = ""
             try:
                 data = json.loads(raw_text)
                 html = data.get("data", "")
             except Exception:
+                # If it's not JSON, might be raw HTML (which we can still attempt to parse)
                 html = raw_text
+                
+            if not html or len(html.strip()) < 50:
+                print("   - ❌ Error: Investing API returned empty or too short response.")
+                return False, []
                 
             soup = BeautifulSoup(html, "html.parser")
             
-            for tr in soup.find_all("tr", class_="js-event-item"):
+            # 1. Look for the actual row markers to confirm it's a real calendar
+            rows = soup.find_all("tr", class_="js-event-item")
+            if not rows:
+                # Check for "No Results" specifically
+                if "No Events Scheduled" in html or "noResults" in html:
+                    print("   - ✅ Success: Calendar loaded, but truly no events scheduled.")
+                    return True, []
+                print("   - ❌ Error: Calendar structure markers (js-event-item) not found. Blocked or format change?")
+                return False, []
+            
+            print(f"   - Status: Found {len(rows)} raw calendar rows. Filtering for High Impact...")
+            
+            for tr in rows:
                 try:
                     datetime_str = tr.get("data-event-datetime")  # e.g., "2026/04/10 15:30:00"
                     if not datetime_str: continue
@@ -715,8 +740,6 @@ async def _fetch_investing_macro_events(session, timeframe_tab):
 
                     sentiment_td = tr.find("td", class_="sentiment")
                     if sentiment_td and sentiment_td.get("data-img_key") == "bull3":
-                        # Convert datetime string to epoch timestamp (Assuming UTC returned by the API for timezone=8)
-                        # The API returns format: "2026/04/10 15:30:00"
                         dt = datetime.strptime(datetime_str, "%Y/%m/%d %H:%M:%S")
                         event_ts = int(dt.replace(tzinfo=timezone.utc).timestamp())
                         

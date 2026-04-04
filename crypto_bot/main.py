@@ -665,29 +665,58 @@ async def fetch_top_news(session):
 async def _fetch_all_high_impact_events(session, horizon_days=1):
     """
     Consolidated helper to fetch High Impact events from both current and next week.
-    Handles deduplication and sorting.
+    Handles primary/fallback URLs, detailed logging, and success/failure signaling.
     """
-    try:
-        urls = [
-            "https://nfs.faireconomy.media/ff_calendar_thisweek.xml",
-            "https://nfs.faireconomy.media/ff_calendar_nextweek.xml"
-        ]
-        
-        all_events = []
-        now_ts = utc_now().timestamp()
-        limit_ts = now_ts + (86400 * horizon_days)
-        seen_titles = set()
-        headers = {"User-Agent": "Mozilla/5.0"}
+    now_ts = utc_now().timestamp()
+    limit_ts = now_ts + (86400 * horizon_days)
+    all_events = []
+    seen_titles = set()
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    # We want to check both this week and next week to avoid weekend blind spots.
+    # For each, we have a primary and fallback URL.
+    feed_targets = [
+        {
+            "label": "This Week",
+            "primaries": ["https://nfs.faireconomy.media/ff_calendar_thisweek.xml"],
+            "fallbacks": ["https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.xml"]
+        },
+        {
+            "label": "Next Week",
+            "primaries": ["https://nfs.faireconomy.media/ff_calendar_nextweek.xml"],
+            "fallbacks": ["https://cdn-nfs.faireconomy.media/ff_calendar_nextweek.xml"]
+        }
+    ]
 
-        import xml.etree.ElementTree as ET
-        
-        for url in urls:
+    import xml.etree.ElementTree as ET
+    
+    total_successful_feeds = 0
+    total_attempted_feeds = len(feed_targets)
+
+    for target in feed_targets:
+        feed_success = False
+        # Try primaries first, then fallbacks
+        for url in (target["primaries"] + target["fallbacks"]):
+            print(f"📡 Macro Fetch: Checking {target['label']} via {url}...")
             try:
                 async with session.get(url, headers=headers, timeout=10) as response:
+                    content_type = response.headers.get("Content-Type", "").lower()
+                    print(f"   - Status: {response.status} | Content-Type: {content_type}")
+                    
                     if response.status != 200:
                         continue
+                    
+                    if "xml" not in content_type:
+                        print(f"   - ⚠️ Warning: Expected XML but got {content_type}. Skipping.")
+                        continue
+                        
                     xml_data = await response.text()
+                    if not xml_data.strip().startswith("<?xml") and not xml_data.strip().startswith("<weeklyevents"):
+                        print("   - ⚠️ Warning: Invalid XML body. Skipping.")
+                        continue
+
                     root = ET.fromstring(xml_data)
+                    events_in_this_feed = 0
                     
                     for item in root.findall('event'):
                         impact_node = item.find('impact')
@@ -703,27 +732,39 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
                             continue
                         
                         dt_str = f"{date_node.text.strip()} {time_node.text.strip()}"
-                        event_dt = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p").replace(tzinfo=timezone.utc)
-                        event_ts = event_dt.timestamp()
+                        try:
+                            event_dt = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p").replace(tzinfo=timezone.utc)
+                            event_ts = event_dt.timestamp()
+                        except:
+                            continue # Skip malformed dates
                         
-                        # Deduplication key
                         unique_id = f"{title_node.text.strip()}_{event_ts}"
                         
                         if now_ts <= event_ts <= limit_ts and unique_id not in seen_titles:
                             all_events.append({
                                 "title": title_node.text.strip(),
                                 "country": country_node.text.strip(),
+                                "date": event_dt.strftime("%m-%d"),
                                 "time": event_dt.strftime("%H:%M UTC"),
                                 "timestamp": event_ts
                             })
                             seen_titles.add(unique_id)
-            except:
-                continue # Skip failing URLs
+                            events_in_this_feed += 1
 
-        return sorted(all_events, key=lambda x: x['timestamp'])
-    except Exception as exc:
-        print(f"macro_fetch_helper error: {exc}")
-        return []
+                    print(f"   - ✅ Success: Extracted {events_in_this_feed} unique High-Impact events.")
+                    feed_success = True
+                    total_successful_feeds += 1
+                    break # Success on this timeframe, don't try fallbacks
+            except Exception as e:
+                print(f"   - ❌ Error: {e}")
+                continue
+
+    # Return success = True if at least one timeframe feed was successfully processed.
+    # If all feeds (This Week AND Next Week) failed, we signal a failure.
+    return {
+        "success": total_successful_feeds > 0,
+        "events": sorted(all_events, key=lambda x: x['timestamp'])
+    }
 
 
 async def fetch_macro_events(session):
@@ -793,7 +834,9 @@ async def send_daily_digest(session, target_date_str, mark_as_sent=True):
         snapshots.append(await fetch_symbol_snapshot(session, symbol, config))
 
     top_news = await fetch_top_news(session)
-    upcoming_macro = await fetch_macro_events(session)
+    # Fetch 24h Macro Events
+    macro_data = await fetch_macro_events(session)
+    upcoming_macro = macro_data["events"] if macro_data["success"] else []
     
     # Fetch 24h Liquidation Stats
     cutoff_iso = (utc_now() - timedelta(hours=24)).isoformat()
@@ -1056,7 +1099,12 @@ async def handle_admin_command(session, command, args, chat_id):
         return
 
     if command == "/macro":
-        events = await fetch_weekly_macro_events(session)
+        result = await fetch_weekly_macro_events(session)
+        if not result["success"]:
+            await send_telegram_message(session, chat_id, "⚠️ Macro calendar feed unavailable right now. Please try again later.")
+            return
+
+        events = result["events"]
         if not events:
             await send_telegram_message(session, chat_id, "📅 No High Impact macro events found for the next 7 days.")
             return

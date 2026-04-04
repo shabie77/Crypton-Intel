@@ -522,7 +522,7 @@ def calculate_market_pulse(snapshots, config):
     return {"score": score, "label": label, "watch_next": watch_next}
 
 
-def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None):
+def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None, macro_partial_failure=False):
     lines = [
         "<b>📰 DAILY MARKET DIGEST</b>",
         f"<b>Time:</b> {html_safe(ist_now())}",
@@ -560,6 +560,10 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
         lines.append("<b>Upcoming Macro (24h)</b>")
         for event in upcoming_macro:
             lines.append(f"- <code>{event['time']}</code> | <b>{html_safe(event['title'])}</b> ({event['country']})")
+        lines.append("")
+    elif macro_partial_failure:
+        lines.append("<b>Upcoming Macro (24h)</b>")
+        lines.append("- Macro source partially unavailable right now. Check <code>/macro</code> again later.")
         lines.append("")
 
     lines.append("<b>Major Coin Snapshot</b>")
@@ -691,9 +695,11 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
     
     total_successful_feeds = 0
     total_attempted_feeds = len(feed_targets)
+    target_status = {}
 
     for target in feed_targets:
         feed_success = False
+        target_event_count = 0
         for url in (target["primaries"] + target.get("fallbacks", [])):
             print(f"📡 Macro Fetch: Checking {target['label']} via {url}...")
             try:
@@ -748,6 +754,7 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
                             })
                             seen_titles.add(unique_id)
                             events_in_this_feed += 1
+                            target_event_count += 1
 
                     if events_in_this_feed > 0:
                         print(f"   - ✅ Success: Extracted {events_in_this_feed} unique High-Impact events.")
@@ -763,12 +770,30 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
 
         if not feed_success:
             print(f"   - {target['label']} feed unavailable after primary/fallback attempts.")
+        target_status[target["label"]] = {
+            "ok": feed_success,
+            "count": target_event_count,
+        }
 
-    # Return success = True if at least ONE timeframe feed was successfully processed.
-    # This prevents the bot from appearing "down" if only Next Week (404) is unavailable.
+    this_week_ok = target_status.get("This Week", {}).get("ok", False)
+    next_week_ok = target_status.get("Next Week", {}).get("ok", False)
+    this_week_count = target_status.get("This Week", {}).get("count", 0)
+    next_week_count = target_status.get("Next Week", {}).get("count", 0)
+    partial_failure = (this_week_ok or next_week_ok) and not (this_week_ok and next_week_ok)
+
+    print(
+        "📊 Macro Fetch Summary: "
+        f"this_week_ok={this_week_ok} count={this_week_count} | "
+        f"next_week_ok={next_week_ok} count={next_week_count} | "
+        f"partial_failure={partial_failure} | total_events={len(all_events)}"
+    )
+
     return {
-        "success": bool(all_events) or total_successful_feeds == total_attempted_feeds,
-        "events": sorted(all_events, key=lambda x: x['timestamp'])
+        "success": total_successful_feeds > 0,
+        "partial_failure": partial_failure,
+        "this_week_ok": this_week_ok,
+        "next_week_ok": next_week_ok,
+        "events": sorted(all_events, key=lambda x: x['timestamp']),
     }
 
 
@@ -852,7 +877,8 @@ async def send_daily_digest(session, target_date_str, mark_as_sent=True):
         snapshots, pulse, config, 
         top_news=top_news, 
         upcoming_macro=upcoming_macro, 
-        liq_stats=liq_stats
+        liq_stats=liq_stats,
+        macro_partial_failure=macro_data.get("partial_failure", False) and not upcoming_macro
     )
     sent = await broadcast_message(session, digest)
     database.log_alert("daily_digest", "MULTI", digest, iso_now())
@@ -1110,6 +1136,9 @@ async def handle_admin_command(session, command, args, chat_id):
             return
 
         events = result["events"]
+        if not events and result.get("partial_failure"):
+            await send_telegram_message(session, chat_id, "⚠️ Next-week macro source unavailable right now. Please try again later.")
+            return
         if not events:
             await send_telegram_message(session, chat_id, "📅 No High Impact macro events found for the next 7 days.")
             return

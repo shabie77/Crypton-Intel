@@ -8,7 +8,6 @@ from email.utils import parsedate_to_datetime
 import aiohttp
 import websockets
 from dotenv import load_dotenv
-import google.generativeai as genai
 
 import database
 
@@ -31,13 +30,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Initialize Gemini if key exists
+# Gemini AI status
 if GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        print("🤖 Gemini AI Intelligence Layer initialized.")
-    except Exception as e:
-        print(f"❌ Gemini Initialization failed: {e}")
+    print("🤖 Gemini AI Intelligence Layer initialized (Direct REST API).")
 else:
     print("⚠️ Gemini API Key missing. Bot will use manual market summary logic.")
 
@@ -580,8 +575,37 @@ def summarize_market_logic(snapshots, pulse):
     return "Market is currently in an accumulation phase with mixed signals across the board."
 
 
+GEMINI_MODELS = ["gemini-2.0-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-pro"]
+
+
+async def call_gemini_rest(session, prompt):
+    """Calls Gemini REST API directly via aiohttp. Tries multiple models."""
+    for model_name in GEMINI_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        try:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                    if text:
+                        print(f"🤖 Gemini AI success via model: {model_name}")
+                        return text.strip()
+                elif resp.status == 404:
+                    print(f"⚠️ Model {model_name} not found (404). Trying next...")
+                    continue
+                else:
+                    error_body = await resp.text()
+                    print(f"❌ Gemini API error ({resp.status}) for {model_name}: {error_body[:200]}")
+                    return None
+        except Exception as e:
+            print(f"❌ Gemini REST call failed for {model_name}: {e}")
+            return None
+    return None
+
+
 async def get_ai_market_summary(session, snapshots, pulse):
-    """ Generates a professional AI market summary using Gemini. """
+    """ Generates a professional AI market summary using Gemini REST API. """
     if not GEMINI_API_KEY:
         missing_msg = (
             f"⚠️ <b>GEMINI API KEY MISSING</b>\n\n"
@@ -592,7 +616,6 @@ async def get_ai_market_summary(session, snapshots, pulse):
         return summarize_market_logic(snapshots, pulse)
         
     try:
-        # Prepare context for AI
         coin_info = []
         for s in snapshots:
             if s:
@@ -607,33 +630,15 @@ async def get_ai_market_summary(session, snapshots, pulse):
             f"Output only the summary text."
         )
         
-        # Dynamic Model Fallback (Handle regional 404s)
-        try:
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            response = await asyncio.to_thread(model.generate_content, prompt)
-        except Exception as flash_err:
-            if "404" in str(flash_err) or "not found" in str(flash_err).lower():
-                print("⚠️ 1.5-Flash not found. Falling back to gemini-pro.")
-                model = genai.GenerativeModel('gemini-pro')
-                response = await asyncio.to_thread(model.generate_content, prompt)
-            else:
-                raise flash_err
-        
-        if response and response.text:
-            return response.text.strip()
+        result = await call_gemini_rest(session, prompt)
+        if result:
+            return result
     except Exception as e:
-        err_str = str(e).lower()
-        status_label = "(API Error)"
-        if "api_key_invalid" in err_str or "400" in err_str:
-            status_label = "(Invalid Key ❌)"
-            
         print(f"🤖 Gemini AI Synthesis failed: {e}. Falling back to manual logic.")
-        # Private Alert for Admin
         alert_msg = (
             f"⚠️ <b>GEMINI AI FAILURE</b>\n\n"
-            f"<b>Error:</b> {html_safe(str(e))}\n"
-            f"<b>Status:</b> {status_label}\n\n"
-            f"<i>The daily digest is falling back to manual logic. Please check your API key on Railway.</i>"
+            f"<b>Error:</b> {html_safe(str(e))}\n\n"
+            f"<i>The daily digest is falling back to manual logic.</i>"
         )
         asyncio.create_task(send_telegram_message(session, ADMIN_USER_ID, alert_msg))
         

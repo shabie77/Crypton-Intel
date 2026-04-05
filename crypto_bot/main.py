@@ -1349,12 +1349,12 @@ async def register_admin_commands(session):
     common_commands = [
         {"command": "start", "description": "Register for alerts"},
         {"command": "help", "description": "Show command list"},
-        {"command": "digest", "description": "Get latest market digest"},
         {"command": "feedback", "description": "Send suggestion/feedback"}
     ]
     
     # Admin-only commands (Scoped to ADMIN_USER_ID)
     admin_only = common_commands + [
+        {"command": "digest", "description": "Get latest market digest"},
         {"command": "status", "description": "Show bot health"},
         {"command": "macro", "description": "Audit upcoming macro events"},
         {"command": "channels", "description": "List active channels"},

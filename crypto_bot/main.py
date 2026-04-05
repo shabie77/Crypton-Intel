@@ -8,6 +8,7 @@ from email.utils import parsedate_to_datetime
 import aiohttp
 import websockets
 from dotenv import load_dotenv
+import google.generativeai as genai
 
 import database
 
@@ -28,6 +29,19 @@ if not DATA_DIR:
 os.makedirs(DATA_DIR, exist_ok=True)
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Initialize Gemini if key exists
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        print("🤖 Gemini AI Intelligence Layer initialized.")
+    except Exception as e:
+        print(f"❌ Gemini Initialization failed: {e}")
+else:
+    print("⚠️ Gemini API Key missing. Bot will use manual market summary logic.")
+
 RSI_STATE_FILE = os.getenv("RSI_STATE_FILE", os.path.join(DATA_DIR, "rsi_state.json"))
 LAST_DIGEST_FILE = os.getenv("LAST_DIGEST_FILE", os.path.join(DATA_DIR, "last_digest.txt"))
 CONFIG_FILE = os.getenv("CONFIG_FILE", os.path.join(DATA_DIR, "config.json"))
@@ -551,22 +565,41 @@ def calculate_market_pulse(snapshots, config):
 
     return {"score": score, "label": label, "watch_next": watch_next}
 
-def summarize_market_logic(snapshots, pulse):
-    """ Generates a short, professional market summary. """
-    bulls = [s for s in snapshots if s and "BULLISH" in s["trend"]]
-    bears = [s for s in snapshots if s and "BEARISH" in s["trend"]]
-    oversold = [s for s in snapshots if s and s["rsi"] < 35]
-    
-    if len(bulls) >= 2:
-        return "Market is showing resilient bullish structure across majors, though volume remains thin."
-    if len(bears) >= 2:
-        if oversold:
-            return f"Heavily bearish momentum, however {oversold[0]['tag']} is approaching oversold territory."
-        return "Broad bearish momentum persists. Institutional flows remain cautious."
     return "Market is currently in an accumulation phase with mixed signals across the board."
 
+async def get_ai_market_summary(snapshots, pulse):
+    """ Generates a professional AI market summary using Gemini. """
+    if not GEMINI_API_KEY:
+        return summarize_market_logic(snapshots, pulse)
+        
+    try:
+        # Prepare context for AI
+        coin_info = []
+        for s in snapshots:
+            if s:
+                coin_info.append(f"#{s['tag']}: ${s['price']:,.2f} ({s['change_24h']:+.2f}% 24h, Trend: {s['trend']}, RSI: {s['rsi']:.1f})")
+        
+        context = "\n".join(coin_info)
+        prompt = (
+            f"Act as a professional Crypto Market Analyst. Summarize the following 24h market data into 2-3 precise, "
+            f"insightful sentences for a high-level trading digest. Focus on trend confluence and momentum.\n\n"
+            f"Market Pulse Score: {pulse['score']}/100 ({pulse['label']})\n"
+            f"24h Snapshots:\n{context}\n\n"
+            f"Output only the summary text."
+        )
+        
+        model = genai.GenerativeModel('gemini-pro')
+        response = await asyncio.to_thread(model.generate_content, prompt)
+        
+        if response and response.text:
+            return response.text.strip()
+    except Exception as e:
+        print(f"🤖 Gemini AI Synthesis failed: {e}. Falling back to manual logic.")
+        
+    return summarize_market_logic(snapshots, pulse)
 
-def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None, macro_partial_failure=False):
+
+async def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None, macro_partial_failure=False):
     lines = [
         "📰 <b>DAILY MARKET DIGEST</b>",
         f"Time: {html_safe(ist_now())}",
@@ -595,37 +628,6 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
     lines.append("")
     
     # 24h Liquidation Section
-    if liq_stats:
-        total = liq_stats["total"]
-        if total > 0:
-            long_p = (liq_stats['longs'] / total) * 100
-            short_p = (liq_stats['shorts'] / total) * 100
-            composition = f"{long_p:.1f}% Longs | {short_p:.1f}% Shorts"
-        else:
-            composition = "0% Longs | 0% Shorts"
-
-        liq_cfg = config.get("liquidation_settings", DEFAULT_CONFIG["liquidation_settings"])
-        status = "NORMAL ⚪"
-        if total >= liq_cfg["extreme"]:
-            status = "EXTREME 🔴"
-        elif total >= liq_cfg["high"]:
-            status = "HIGH 🟠"
-
-        lines.append("<b>24h Liquidations</b>")
-        lines.append(f"- Total: ${total:,.0f} [{status}]")
-        lines.append(f"- Longs: ${liq_stats['longs']:,.0f} | Shorts: ${liq_stats['shorts']:,.0f}")
-        lines.append(f"- Composition: {composition}")
-        lines.append("")
-
-    if upcoming_macro:
-        lines.append("<b>Upcoming Macro (24h)</b>")
-        for event in upcoming_macro:
-            lines.append(f"- <code>{event['time']}</code> | <b>{html_safe(event['title'])}</b> ({event['country']})")
-        lines.append("")
-    elif macro_partial_failure:
-        lines.append("<b>Upcoming Macro (24h)</b>")
-        lines.append("- Macro source partially unavailable right now. Check <code>/macro</code> again later.")
-        lines.append("")
 
     lines.append("<b>Major Coin Snapshot</b>")
     for snapshot in snapshots:
@@ -649,7 +651,7 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
     lines.append("")
 
     # Market Summary section
-    summary = summarize_market_logic(snapshots, pulse)
+    summary = await get_ai_market_summary(snapshots, pulse)
     lines.append("📊 <b>Market Summary</b>")
     lines.append(f"{html_safe(summary)}")
     lines.append("")
@@ -1060,7 +1062,7 @@ async def send_daily_digest(session, target_date_str, mark_as_sent=True):
     liq_stats = database.get_24h_liquidation_stats(cutoff_iso)
     
     pulse = calculate_market_pulse(snapshots, config)
-    digest = build_digest_message(
+    digest = await build_digest_message(
         snapshots, pulse, config, 
         top_news=top_news, 
         upcoming_macro=upcoming_macro, 
@@ -1276,7 +1278,8 @@ async def register_admin_commands(session):
     common_commands = [
         {"command": "start", "description": "Register for alerts"},
         {"command": "help", "description": "Show command list"},
-        {"command": "digest", "description": "Get latest market digest"}
+        {"command": "digest", "description": "Get latest market digest"},
+        {"command": "feedback", "description": "Send suggestion/feedback"}
     ]
     
     # Admin-only commands (Scoped to ADMIN_USER_ID)

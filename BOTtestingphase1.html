@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Intelligence Bot - Testing Phase 1 Spec</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #00ffca;
+            --bg: #0b0e11;
+            --card-bg: #1e2329;
+            --text: #eaecef;
+            --text-muted: #848e9c;
+            --border: #2b2f36;
+            --accent: #2ebd85;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            margin: 0;
+            padding: 40px 20px;
+            display: flex;
+            justify-content: center;
+        }
+
+        .container {
+            max-width: 900px;
+            width: 100%;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 50px;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #fff, var(--primary));
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            font-size: 1.1rem;
+            color: var(--text-muted);
+            letter-spacing: 1px;
+        }
+
+        .section {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 25px;
+            border: 1px solid var(--border);
+            transition: transform 0.2s ease;
+        }
+
+        .section:hover {
+            transform: translateY(-2px);
+            border-color: var(--primary);
+        }
+
+        h2 {
+            font-size: 1.5rem;
+            color: var(--primary);
+            margin-top: 0;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        li {
+            margin-bottom: 15px;
+            padding-left: 20px;
+            position: relative;
+        }
+
+        li::before {
+            content: "•";
+            color: var(--primary);
+            position: absolute;
+            left: 0;
+            font-weight: bold;
+        }
+
+        strong {
+            color: #fff;
+        }
+
+        code {
+            background: #000;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Courier New', Courier, monospace;
+            color: var(--accent);
+        }
+
+        .badge {
+            font-size: 0.8rem;
+            background: #2b3139;
+            padding: 4px 10px;
+            border-radius: 20px;
+            color: var(--text-muted);
+            font-weight: 600;
+            display: inline-block;
+            margin-bottom: 15px;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 50px;
+            padding: 20px;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            border-top: 1px solid var(--border);
+        }
+
+        .tag-list {
+            margin-top: 10px;
+        }
+
+        .tag {
+            display: inline-block;
+            background: #2b3139;
+            color: #fff;
+            padding: 2px 8px;
+            border-radius: 4px;
+            margin-right: 5px;
+            font-size: 0.85rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="badge">SYSTEM READY: V1.0-STABLE</div>
+            <h1>CRYPTO INTELLIGENCE BOT</h1>
+            <p class="subtitle">Testing Phase 1: Technical Specification Baseline</p>
+        </header>
+
+        <!-- Section 1: RSI Engine -->
+        <div class="section">
+            <h2>📈 Multi-Timeframe RSI Engine</h2>
+            <ul>
+                <li><strong>Loop Cycle:</strong> Automated scanning every <code>10 minutes</code>.</li>
+                <li><strong>Asset Coverage:</strong> Monitors symbols in <code>tracked_coins</code>.
+                    <div class="tag-list">
+                        <span class="tag">BTC</span><span class="tag">ETH</span><span class="tag">SOL</span><span class="tag">XRP</span><span class="tag">ADA</span>
+                    </div>
+                </li>
+                <li><strong>Trigger Thresholds:</strong> Boundary triggers at <code>Oversold &lt; 25</code> and <code>Overbought &gt; 75</code>.</li>
+                <li><strong>Volume Filter:</strong> Requires candle volume to exceed <code>1.15x</code> of the average of the <strong>previous 20 candles</strong> for that specific timeframe.</li>
+                <li><strong>Deduplication:</strong> State persistent via <code>rsi_state.json</code>.</li>
+            </ul>
+        </div>
+
+        <!-- Section 2: News & Liquidation Alerts -->
+        <div class="section">
+            <h2>🚀 Real-Time Intelligence Alerts</h2>
+            <ul>
+                <li><strong>Breaking News:</strong> Automated news loop checks the configured news feed every 5 minutes, deduplicates alerts, and skips stale articles after restart.</li>
+                <li><strong>Exchange-Wide Liquidations:</strong> Integrated with Binance <code>!forceOrder@arr</code>, capturing every market-wide Binance Futures liquidation.</li>
+                <li><strong>Alert Logic:</strong> Broadcasts for tracked coins when liquidation exceeds <code>$50,000</code>. Includes trend confluence (4h SMA) and custom intelligence insights.</li>
+            </ul>
+        </div>
+
+        <!-- Section 3: Daily Digest -->
+        <div class="section">
+            <h2>📰 Executive Market Digest</h2>
+            <ul>
+                <li><strong>Scheduling:</strong> Configurable via UTC settings (Default: <code>04:00 UTC / 09:30 AM IST</code>).</li>
+                <li><strong>Pinned Core Assets:</strong> <code>BTC</code>, <code>ETH</code>, and <code>SOL</code> stay permanently pinned as core digest coins even if tracking list is modified.</li>
+                <li><strong>Market Pulse:</strong> Formula-driven 0-100 score weighing <strong>Trend, RSI, Price Change, Powell Bias, and ETF Bias</strong>.</li>
+                <li><strong>Liquidation matrix:</strong> Shows <strong>Total Amount</strong>, absolute <strong>Long Value</strong>, <strong>Short Value</strong>, and <strong>Composition Ratio (%)</strong> with status labels: <code>NORMAL / HIGH / EXTREME</code>.</li>
+                <li><strong>Macro Outlook:</strong> Includes a dedicated <code>Upcoming Macro (24h)</code> section showing high-impact events.</li>
+                <li><strong>Curated News:</strong> Caps at <strong>Top 3</strong> items; includes Severity Label, Source, and a "Why it matters" impact explanation.</li>
+            </ul>
+        </div>
+
+        <!-- Section 4: Admin Commands -->
+        <div class="section">
+            <h2>🛠️ Full Command & Admin Suite</h2>
+            <ul>
+                <li><strong>Menu Sync:</strong> Automated Telegram menu registration via <code>setMyCommands</code>, with admin-exclusive commands hidden from public view.</li>
+                <li><strong>Operational:</strong> <code>/digest</code> (Immediate manual broadcast) and <code>/macro</code> (7-day audit checking both <strong>this week</strong> and <strong>next week</strong> sources to avoid weekend blind spots).</li>
+                <li><strong>Administrative:</strong> <code>/users</code>, <code>/channels</code>, and <code>/send</code> (Global Broadcast).</li>
+                <li><strong>Access Control:</strong> <code>/revoke</code> and <code>/renew</code> (Channel Access Management).</li>
+                <li><strong>Live Config:</strong> <code>/update_coins</code>, <code>/update_powell</code>, and <code>/update_etf</code> (Live persistent JSON modification).</li>
+            </ul>
+        </div>
+
+        <!-- Section 5: Resilience -->
+        <div class="section">
+            <h2>🛡️ Technical Persistence & Resilience</h2>
+            <ul>
+                <li><strong>Persistence Layer:</strong> Exact file-state management for:
+                    <br><code>config.json</code>, <code>rsi_state.json</code>, <code>news_state.json</code>, <code>macro_state.json</code>, <code>last_digest.txt</code>.</li>
+                <li><strong>Primary Storage:</strong> SQLite database tracking <code>liquidations</code>, <code>alerts</code>, <code>users</code>, and <code>channels</code>.</li>
+                <li><strong>Fail-Safe Logic:</strong> Persistent retry count with <strong>linear incremental backoffs</strong> (capped at 60s).</li>
+                <li><strong>Emergency Alert:</strong> Automated <strong>Admin Emergency DM</strong> sent after 3 consecutive exchange connection failures.</li>
+            </ul>
+        </div>
+
+        <footer>
+            &copy; 2026 Crypto Intelligence Bot | Phase 1 Verification Approved | <b>Phase 1 Verified Baseline</b>
+        </footer>
+    </div>
+</body>
+</html>

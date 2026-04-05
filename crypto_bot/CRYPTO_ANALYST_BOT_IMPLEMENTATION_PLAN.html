@@ -1,0 +1,1538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Analyst Bot - Full Implementation Plan</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: #e2e8f0;
+            line-height: 1.6;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #1e293b;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+        
+        header {
+            background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+            padding: 40px 30px;
+            text-align: center;
+            color: white;
+        }
+        
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+        
+        header p {
+            font-size: 1.1em;
+            opacity: 0.95;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .section {
+            margin-bottom: 40px;
+            background: #0f172a;
+            padding: 30px;
+            border-radius: 8px;
+            border-left: 5px solid #f97316;
+        }
+        
+        .section h2 {
+            color: #f97316;
+            font-size: 1.8em;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .section h3 {
+            color: #60a5fa;
+            font-size: 1.3em;
+            margin-top: 25px;
+            margin-bottom: 15px;
+        }
+        
+        .feature-box {
+            background: #1e293b;
+            padding: 20px;
+            margin: 15px 0;
+            border-radius: 6px;
+            border-left: 4px solid #60a5fa;
+        }
+        
+        .feature-box h4 {
+            color: #fbbf24;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+        
+        .feature-box p {
+            color: #cbd5e1;
+            margin-bottom: 10px;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: bold;
+            margin-right: 8px;
+            margin-bottom: 8px;
+        }
+        
+        .badge-free {
+            background: #10b981;
+            color: white;
+        }
+        
+        .badge-time {
+            background: #8b5cf6;
+            color: white;
+        }
+        
+        .badge-priority {
+            background: #ef4444;
+            color: white;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: #0f172a;
+        }
+        
+        th, td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 1px solid #334155;
+        }
+        
+        th {
+            background: #1e293b;
+            color: #f97316;
+            font-weight: bold;
+        }
+        
+        tr:hover {
+            background: #1e293b;
+        }
+        
+        .timeline {
+            position: relative;
+            padding: 20px 0;
+        }
+        
+        .timeline-item {
+            display: flex;
+            margin-bottom: 30px;
+            position: relative;
+        }
+        
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: 19px;
+            top: 50px;
+            width: 2px;
+            height: 30px;
+            background: #60a5fa;
+        }
+        
+        .timeline-item:last-child::before {
+            display: none;
+        }
+        
+        .timeline-dot {
+            width: 40px;
+            height: 40px;
+            background: #f97316;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            flex-shrink: 0;
+            margin-right: 20px;
+            position: relative;
+            z-index: 1;
+        }
+        
+        .timeline-content {
+            flex: 1;
+        }
+        
+        .timeline-content h4 {
+            color: #fbbf24;
+            margin-bottom: 8px;
+        }
+        
+        .timeline-content p {
+            color: #cbd5e1;
+            margin-bottom: 8px;
+        }
+        
+        .cost-box {
+            background: #065f46;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #10b981;
+        }
+        
+        .cost-box strong {
+            color: #10b981;
+        }
+        
+        .risk-box {
+            background: #7c2d12;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #f97316;
+        }
+        
+        .risk-box strong {
+            color: #fed7aa;
+        }
+        
+        .tech-stack {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .tech-item {
+            background: #1e293b;
+            padding: 15px;
+            border-radius: 6px;
+            border-left: 4px solid #60a5fa;
+        }
+        
+        .tech-item h4 {
+            color: #60a5fa;
+            margin-bottom: 10px;
+        }
+        
+        .tech-item p {
+            color: #cbd5e1;
+            font-size: 0.95em;
+        }
+        
+        .alert {
+            background: #164e63;
+            border-left: 4px solid #06b6d4;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            color: #cffafe;
+        }
+        
+        .success {
+            background: #065f46;
+            border-left: 4px solid #10b981;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            color: #dcfce7;
+        }
+        
+        ul, ol {
+            margin-left: 20px;
+            margin-top: 10px;
+            margin-bottom: 10px;
+        }
+        
+        li {
+            margin-bottom: 8px;
+            color: #cbd5e1;
+        }
+        
+        code {
+            background: #0f172a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #60a5fa;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .code-block {
+            background: #0f172a;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 15px 0;
+            border-left: 4px solid #60a5fa;
+        }
+        
+        .code-block code {
+            color: #cbd5e1;
+            display: block;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .summary-card {
+            background: #1e293b;
+            padding: 20px;
+            border-radius: 8px;
+            border-top: 4px solid #f97316;
+            text-align: center;
+        }
+        
+        .summary-card h3 {
+            color: #f97316;
+            margin-bottom: 10px;
+        }
+        
+        .summary-card p {
+            color: #cbd5e1;
+            font-size: 0.95em;
+        }
+        
+        footer {
+            background: #0f172a;
+            padding: 20px;
+            text-align: center;
+            color: #94a3b8;
+            border-top: 1px solid #334155;
+        }
+        
+        .highlight {
+            color: #fbbf24;
+            font-weight: bold;
+        }
+        
+        .emoji {
+            font-size: 1.2em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Crypto Analyst Bot</h1>
+            <p>Full Implementation Plan - Testing Phase</p>
+        </header>
+        
+        <div class="content">
+            <!-- Executive Summary -->
+            <div class="section">
+                <h2><span class="emoji">📋</span> Executive Summary</h2>
+                
+                <p style="color: #cbd5e1; margin-bottom: 20px;">
+                    This is a <strong>real-time market analysis bot</strong> that synthesizes multiple data sources (RSI, ETF flows, macro events, news, liquidations) into daily morning digests and real-time alerts. Unlike signal bots that predict buy/sell, this analyst bot educates traders on <strong>why markets move</strong>, building trust and long-term retention.
+                </p>
+                
+                <div class="summary-grid">
+                    <div class="summary-card">
+                        <h3>Total Cost</h3>
+                        <p><strong style="color: #10b981; font-size: 1.5em;">$0</strong></p>
+                        <p>100% free/low-budget features</p>
+                    </div>
+                    <div class="summary-card">
+                        <h3>Build Time</h3>
+                        <p><strong style="color: #10b981; font-size: 1.5em;">3-5 Days</strong></p>
+                        <p>Using Codex Pro + Antigravity</p>
+                    </div>
+                    <div class="summary-card">
+                        <h3>Testing Phase</h3>
+                        <p><strong style="color: #10b981; font-size: 1.5em;">2-4 Weeks</strong></p>
+                        <p>Validate signals, build track record</p>
+                    </div>
+                </div>
+                
+                <div class="alert">
+                    <strong>🎯 Key Insight:</strong> You're not building a signal bot. You're building an analyst platform that educates traders. This is a fundamentally different (and better) market opportunity.
+                </div>
+            </div>
+            
+            <!-- Core Features -->
+            <div class="section">
+                <h2><span class="emoji">✨</span> Core Features (Testing Phase)</h2>
+                
+                <h3>1. Morning Market Digest (Once Daily at 8:00 AM UTC)</h3>
+                <div class="feature-box">
+                    <h4>📊 What It Includes</h4>
+                    <p><strong>For each major coin (BTC, ETH, SOL + 3 altcoins):</strong></p>
+                    <ul>
+                        <li><strong>24-Hour Price Movement:</strong> +4.2% or -2.1%</li>
+                        <li><strong>Daily RSI Value:</strong> Current RSI (14-period) → Oversold/Neutral/Overbought</li>
+                        <li><strong>Volume Analysis:</strong> +15% above average or -8% below average</li>
+                        <li><strong>4-Hour Chart Context:</strong> Consolidating/Bullish/Bearish/Recovery</li>
+                    </ul>
+                    
+                    <h4>Overall Market Sentiment Score:</h4>
+                    <p>Single metric combining all signals (0-100 scale):</p>
+                    <ul>
+                        <li>0-25: 🔴 EXTREME FEAR (oversold)</li>
+                        <li>26-40: 🟠 FEAR</li>
+                        <li>41-60: 🟡 NEUTRAL</li>
+                        <li>61-75: 🟢 GREED</li>
+                        <li>76-100: 🔴 EXTREME GREED (overbought)</li>
+                    </ul>
+                    
+                    <span class="badge badge-free">FREE</span>
+                    <span class="badge badge-time">5 mins read</span>
+                    <span class="badge badge-priority">HIGHEST PRIORITY</span>
+                </div>
+                
+                <h3>2. Macro Economic Calendar Alerts (Real-Time)</h3>
+                <div class="feature-box">
+                    <h4>📅 What It Does</h4>
+                    <p>Tracks major economic events that move crypto markets. Sends alerts before scheduled events.</p>
+                    
+                    <h4>Key Events to Monitor:</h4>
+                    <ul>
+                        <li><strong>CPI Release (Monthly):</strong> "🔴 EXTREME - US CPI releasing in 2 hours. Expect 2-3% volatility"</li>
+                        <li><strong>Fed Interest Rate Decision:</strong> "🔴 EXTREME - Rate decision at 18:00 UTC. Markets consolidating"</li>
+                        <li><strong>NFP (Non-Farm Payroll):</strong> "🟠 HIGH - Job report Friday 13:30 UTC. Prepare for moves"</li>
+                        <li><strong>Fed Member Speeches:</strong> "🟡 MEDIUM - Powell speaking at 16:00 UTC"</li>
+                        <li><strong>ECB Decisions:</strong> Affects Euro, impacts BTC pairs</li>
+                    </ul>
+                    
+                    <h4>Alert Format:</h4>
+                    <div class="code-block">
+                        <code>📢 MACRO ALERT
+📍 EVENT: US CPI Release
+⏰ TIME: 2 hours
+📊 IMPACT: 🔴 EXTREME (can swing 2-3%)
+💡 Context: Markets at support, ready to move
+✅ Action: Monitor BTC/USD pair</code>
+                    </div>
+                    
+                    <h4>Data Source:</h4>
+                    <p><strong>Forex Factory Calendar (Web Scraper)</strong> - Zero cost, 95% reliable</p>
+                    
+                    <span class="badge badge-free">FREE</span>
+                    <span class="badge badge-time">Real-time</span>
+                    <span class="badge badge-priority">HIGH PRIORITY</span>
+                </div>
+                
+                <h3>3. Powell/Fed Tone Analysis (Manual Update)</h3>
+                <div class="feature-box">
+                    <h4>🏦 What It Does</h4>
+                    <p>Tracks Federal Reserve's stance on interest rates and inflation. One of the <strong>biggest drivers of crypto prices.</strong></p>
+                    
+                    <h4>How It Works:</h4>
+                    <p><strong>You manually assess Fed statements/speeches and update:</strong></p>
+                    <ul>
+                        <li><strong>Dovish (1-2/5):</strong> "Rates will stay low, Fed patient" → Bullish for crypto</li>
+                        <li><strong>Neutral (3/5):</strong> "Monitoring inflation carefully" → Mixed signals</li>
+                        <li><strong>Hawkish (4-5/5):</strong> "Rate hikes coming, fighting inflation" → Bearish for crypto</li>
+                    </ul>
+                    
+                    <h4>Update via Bot Command (No Code Changes):</h4>
+                    <div class="code-block">
+                        <code>/update_powell dovish 2 "Fed signals patient approach to rates"
+✅ Updated successfully</code>
+                    </div>
+                    
+                    <h4>Appears in Morning Digest as:</h4>
+                    <div class="code-block">
+                        <code>🏦 Fed Stance (Last Updated: 2025-04-03)
+Powell Tone: DOVISH (2/5 hawkish)
+Context: "Fed signals patient approach to rate hikes"
+Impact: 🟢 Positive for crypto</code>
+                    </div>
+                    
+                    <h4>Data Source:</h4>
+                    <p><strong>Federal Reserve Official Newsroom RSS Feed</strong> - Zero cost, 100% accurate (manual verification)</p>
+                    
+                    <div class="cost-box">
+                        <strong>⏱️ Update Time:</strong> 10 seconds per update (send bot command, no redeployment)
+                    </div>
+                    
+                    <span class="badge badge-free">FREE</span>
+                    <span class="badge badge-time">1-2 updates/week</span>
+                    <span class="badge badge-priority">HIGH PRIORITY</span>
+                </div>
+                
+                <h3>4. Multi-Timeframe RSI Extreme Alerts (Real-Time)</h3>
+                <div class="feature-box">
+                    <h4>📈 What It Does</h4>
+                    <p>Monitors RSI on 4-Hour, Daily, and Weekly charts. Alerts when extreme conditions (overbought/oversold) are detected <strong>WITH volume confirmation.</strong></p>
+                    
+                    <h4>Alert Conditions:</h4>
+                    <ul>
+                        <li><strong>4-Hour Chart:</strong> RSI > 75 OR RSI < 25 + volume confirmation → 🟡 MODERATE IMPACT</li>
+                        <li><strong>Daily Chart:</strong> RSI > 75 OR RSI < 25 + volume confirmation → 🟠 HIGH IMPACT</li>
+                        <li><strong>Weekly Chart:</strong> RSI > 75 OR RSI < 25 + volume confirmation → 🔴 VERY HIGH IMPACT</li>
+                    </ul>
+                    
+                    <h4>Volume Confirmation Rule:</h4>
+                    <p>Only trigger if:</p>
+                    <ul>
+                        <li>RSI is extreme AND</li>
+                        <li>Trading volume is 15%+ above 20-day average</li>
+                    </ul>
+                    <p><em>This filters out fake signals. Prevents alert fatigue.</em></p>
+                    
+                    <h4>Alert Example:</h4>
+                    <div class="code-block">
+                        <code>🔴 RSI EXTREME - Daily Chart
+📊 BTC/USDT
+RSI: 23 (Oversold)
+Volume: +25% above average
+⏰ Timeframe: Daily (4H: 35, 1W: pending)
+💡 Analysis: Strong oversold bounce potential
+⚠️ Cooldown: Next alert in 6+ hours</code>
+                    </div>
+                    
+                    <h4>Data Source:</h4>
+                    <p><strong>Binance REST API (Free tier)</strong> - Zero cost, real-time candlestick data</p>
+                    
+                    <span class="badge badge-free">FREE</span>
+                    <span class="badge badge-time">Real-time</span>
+                    <span class="badge badge-priority">HIGH PRIORITY</span>
+                </div>
+                
+                <h3>5. ETF Inflow/Outflow Alerts (Real-Time)</h3>
+                <div class="feature-box">
+                    <h4>💰 What It Does</h4>
+                    <p>Tracks institutional money (Spot BTC/ETH ETF inflows). When institutions buy heavily, it signals confidence and often precedes rallies.</p>
+                    
+                    <h4>What Triggers an Alert:</h4>
+                    <ul>
+                        <li><strong>$200M+ daily inflow:</strong> "🟢 Heavy institutional buying detected"</li>
+                        <li><strong>$150M+ daily outflow:</strong> "🔴 Institutional selling detected"</li>
+                        <li><strong>Multi-day trend:</strong> "3-day outflow streak" or "5-day inflow streak"</li>
+                    </ul>
+                    
+                    <h4>Alert Format:</h4>
+                    <div class="code-block">
+                        <code>💰 ETF FLOWS (24h)
+BTC Spot ETF: +$350M inflow 🟢
+ETH Spot ETF: +$120M inflow 🟢
+Total: +$470M (BIG institutional buying)
+📈 Trend: 4-day inflow streak (bullish)</code>
+                    </div>
+                    
+                    <h4>Data Source:</h4>
+                    <p><strong>CoinGlass Free Tier OR Farside Investors (Web Scraper)</strong> - Zero cost, 95% reliability</p>
+                    
+                    <div class="risk-box">
+                        <strong>⚠️ Important:</strong> Scraper might break if website structure changes. Keep 2 backup sources ready.
+                    </div>
+                    
+                    <span class="badge badge-free">FREE</span>
+                    <span class="badge badge-time">Daily in digest</span>
+                    <span class="badge badge-priority">MEDIUM PRIORITY</span>
+                </div>
+                
+                <h3>6. Real-Time News Context (Real-Time)</h3>
+                <div class="feature-box">
+                    <h4>📰 What It Does</h4>
+                    <p>When major crypto news breaks, bot sends alert with context: "Why is BTC moving? → News just dropped"</p>
+                    
+                    <h4>Types of News Alerts:</h4>
+                    <ul>
+                        <li><strong>🔴 Critical:</strong> Major exchange hacked, regulatory news, Bitcoin ETF approved</li>
+                        <li><strong>🟠 High:</strong> Altcoin partnerships, whale transactions, key price levels broken</li>
+                        <li><strong>🟡 Medium:</strong> Developer updates, minor partnerships, analyst reports</li>
+                    </ul>
+                    
+                    <h4>Alert Example:</h4>
+                    <div class="code-block">
+                        <code>📰 BREAKING NEWS
+🔴 Binance faces SEC investigation
+Impact: CRITICAL
+Status: $100B market cap holders at risk
+Action: Monitor price action closely
+⚡ 2 minutes ago</code>
+                    </div>
+                    
+                    <h4>Data Source:</h4>
+                    <p><strong>CryptoCompare News API (Free tier) + CoinTelegraph RSS Feed</strong> - Zero cost</p>
+                    
+                    <span class="badge badge-free">FREE</span>
+                    <span class="badge badge-time">Real-time</span>
+                    <span class="badge badge-priority">MEDIUM PRIORITY</span>
+                </div>
+                
+                <h3>7. Daily Liquidation Context (Real-Time)</h3>
+                <div class="feature-box">
+                    <h4>💥 What It Does</h4>
+                    <p>Tracks aggregate liquidations on major exchanges. Extreme liquidations signal market stress or potential bounces.</p>
+                    
+                    <h4>Alert Conditions:</h4>
+                    <ul>
+                        <li><strong>$500M+ liquidations:</strong> "🔴 EXTREME liquidation event. Market reversal possible"</li>
+                        <li><strong>$250-500M:</strong> "🟠 HIGH liquidations. Watch for bounce"</li>
+                        <li><strong>Long liquidations > Short liquidations:</strong> "Longs being wiped. Short squeeze potential"</li>
+                    </ul>
+                    
+                    <h4>Data Source:</h4>
+                    <p><strong>Binance WebSocket (Free tier)</strong> - Real-time, zero cost</p>
+                    
+                    <span class="badge badge-free">FREE</span>
+                    <span class="badge badge-time">Real-time</span>
+                    <span class="badge badge-priority">MEDIUM PRIORITY</span>
+                </div>
+                
+                <h3>8. Analysis Replay / Performance Tracking (Weekly)</h3>
+                <div class="feature-box">
+                    <h4>📊 What It Does</h4>
+                    <p>Logs your analyses + compares to actual outcomes. Proves signal quality. <strong>Your #1 marketing tool.</strong></p>
+                    
+                    <h4>Weekly Summary Example:</h4>
+                    <div class="code-block">
+                        <code>📈 WEEKLY ANALYSIS REPLAY
+Week of Apr 1-7, 2025
+
+2 weeks ago: "BTC consolidating near support"
+Result: ✅ CORRECT - Bounced and rallied 8%
+
+Last week: "ETH showing weakness, watch 2400 level"
+Result: ✅ CORRECT - Broke below, fell to 2350
+
+Monthly accuracy: 67% (good for analyst, great for bot)
+Avg win size: 4.2% | Avg loss: -1.8%</code>
+                    </div>
+                    
+                    <h4>How to Use:</h4>
+                    <ul>
+                        <li>Track each analysis you make</li>
+                        <li>Record outcome after 1-2 weeks</li>
+                        <li>Share weekly summary (Friday digest)</li>
+                        <li>Builds credibility with subscribers</li>
+                    </ul>
+                    
+                    <span class="badge badge-free">FREE</span>
+                    <span class="badge badge-time">Weekly</span>
+                    <span class="badge badge-priority">HIGH PRIORITY (Marketing)</span>
+                </div>
+                
+                <h3>9. Private Chat Support (Manual)</h3>
+                <div class="feature-box">
+                    <h4>💬 What It Does</h4>
+                    <p>Users can ask questions in private chats. You respond with analysis.</p>
+                    
+                    <h4>Use Cases:</h4>
+                    <ul>
+                        <li>"Why do you think ETH will pump?" → You explain reasoning</li>
+                        <li>"What's your take on SOL right now?" → Quick analysis</li>
+                        <li>"Should I buy at this level?" → Analyst perspective (not financial advice)</li>
+                    </ul>
+                    
+                    <h4>Future Enhancement (Phase 2):</h4>
+                    <p>Add different tiers:</p>
+                    <ul>
+                        <li><strong>Free:</strong> Groups only, delayed digest</li>
+                        <li><strong>Premium:</strong> Private chat access, real-time alerts, custom watchlists</li>
+                    </ul>
+                    
+                    <p><em>Keep simple for testing phase.</em></p>
+                    
+                    <span class="badge badge-free">FREE</span>
+                    <span class="badge badge-time">Variable</span>
+                </div>
+                
+            </div>
+            
+            <!-- Technical Architecture -->
+            <div class="section">
+                <h2><span class="emoji">⚙️</span> Technical Architecture</h2>
+                
+                <h3>System Overview</h3>
+                <p style="color: #cbd5e1;">Your bot runs on Railway Cloud and fetches data from multiple sources every minute, synthesizes into alerts, and sends to Telegram.</p>
+                
+                <div class="code-block">
+                    <code>┌─────────────────────────────────────────────────┐
+│          TELEGRAM BOT (Railway Cloud)            │
+├─────────────────────────────────────────────────┤
+│                                                   │
+│  Background Tasks (Running 24/7)                │
+│  ├─ Binance API Poller (30s interval)           │
+│  ├─ Macro Calendar Scraper (hourly)             │
+│  ├─ ETF Data Scraper (hourly)                   │
+│  ├─ News API Checker (5min interval)            │
+│  ├─ Liquidation WebSocket (real-time)           │
+│  └─ Scheduled Digests (08:00 UTC daily)         │
+│                                                   │
+│  User Interaction                               │
+│  ├─ /update_powell [tone] [score] [note]       │
+│  ├─ /add_coin [symbol]                          │
+│  ├─ /remove_coin [symbol]                       │
+│  ├─ /get_digest (manual trigger)                │
+│  └─ Text messages (conversations)               │
+│                                                   │
+└─────────────────────────────────────────────────┘
+         ↓ ↓ ↓ (sends alerts)
+    Telegram Users (Groups & Private)</code>
+                </div>
+                
+                <h3>Data Sources & APIs</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Feature</th>
+                            <th>Data Source</th>
+                            <th>Cost</th>
+                            <th>Reliability</th>
+                            <th>Update Freq</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>RSI/Volume/Candlesticks</strong></td>
+                            <td>Binance REST API</td>
+                            <td>Free</td>
+                            <td>99.9%</td>
+                            <td>Real-time</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Liquidations</strong></td>
+                            <td>Binance WebSocket</td>
+                            <td>Free</td>
+                            <td>99.9%</td>
+                            <td>Real-time</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Macro Calendar</strong></td>
+                            <td>Forex Factory (scraper)</td>
+                            <td>Free</td>
+                            <td>95%</td>
+                            <td>Hourly</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Powell Tone</strong></td>
+                            <td>Fed Newsroom (manual)</td>
+                            <td>Free</td>
+                            <td>100%</td>
+                            <td>1-2x/week</td>
+                        </tr>
+                        <tr>
+                            <td><strong>ETF Flows</strong></td>
+                            <td>CoinGlass OR Scraper</td>
+                            <td>Free</td>
+                            <td>95%</td>
+                            <td>Daily</td>
+                        </tr>
+                        <tr>
+                            <td><strong>News</strong></td>
+                            <td>CryptoCompare + RSS</td>
+                            <td>Free</td>
+                            <td>98%</td>
+                            <td>Real-time</td>
+                        </tr>
+                    </tbody>
+                </table>
+                
+                <h3>External Config Management</h3>
+                <p style="color: #cbd5e1;">To avoid redeploying to Railway when updating Powell tone or other manual data:</p>
+                
+                <div class="code-block">
+                    <code>Your Railway Bot
+         ↓
+    Reads from: config.json
+         ↓
+{
+  "powell_tone": "dovish",
+  "powell_score": 2,
+  "powell_note": "Fed patient on rates",
+  "last_updated": "2025-04-03",
+  "tracked_coins": ["BTC", "ETH", "SOL"],
+  "alert_cooldown_hours": 6
+}</code>
+                </div>
+                
+                <p style="color: #cbd5e1; margin-top: 15px;"><strong>Update Flow:</strong></p>
+                <ol style="color: #cbd5e1;">
+                    <li>You send: <code>/update_powell dovish 2 "Patient approach"</code></li>
+                    <li>Bot updates <code>config.json</code> directly</li>
+                    <li><strong>No redeployment needed</strong> ✅</li>
+                    <li>Bot reads updated config next morning digest</li>
+                    <li>Users see latest Powell analysis</li>
+                </ol>
+                
+                <h3>Technology Stack</h3>
+                <div class="tech-stack">
+                    <div class="tech-item">
+                        <h4>🐍 Python</h4>
+                        <p>Main bot logic, API calls, data processing</p>
+                    </div>
+                    <div class="tech-item">
+                        <h4>📱 python-telegram-bot</h4>
+                        <p>Telegram integration library</p>
+                    </div>
+                    <div class="tech-item">
+                        <h4>📊 pandas</h4>
+                        <p>Data analysis and calculations</p>
+                    </div>
+                    <div class="tech-item">
+                        <h4>🌐 requests</h4>
+                        <p>HTTP requests to APIs</p>
+                    </div>
+                    <div class="tech-item">
+                        <h4>🔍 BeautifulSoup</h4>
+                        <p>Web scraping (Forex Factory, CoinGlass)</p>
+                    </div>
+                    <div class="tech-item">
+                        <h4>☁️ Railway</h4>
+                        <p>Cloud hosting (already running)</p>
+                    </div>
+                    <div class="tech-item">
+                        <h4>🤖 Codex Pro</h4>
+                        <p>AI-assisted coding</p>
+                    </div>
+                    <div class="tech-item">
+                        <h4>📋 Antigravity Pro</h4>
+                        <p>Project management & documentation</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Implementation Timeline -->
+            <div class="section">
+                <h2><span class="emoji">📅</span> Implementation Timeline</h2>
+                
+                <h3>Phase 1: Core Setup (Days 1-2)</h3>
+                <div class="timeline">
+                    <div class="timeline-item">
+                        <div class="timeline-dot">1</div>
+                        <div class="timeline-content">
+                            <h4>Set up External Config Management</h4>
+                            <p>Create <code>config.json</code> for storing Powell tone, tracked coins, settings</p>
+                            <p style="margin-top: 10px;"><strong>With Codex:</strong> 30 mins</p>
+                        </div>
+                    </div>
+                    
+                    <div class="timeline-item">
+                        <div class="timeline-dot">2</div>
+                        <div class="timeline-content">
+                            <h4>Build /update_powell Command Handler</h4>
+                            <p>Allow manual updates without code editing</p>
+                            <p style="margin-top: 10px;"><strong>With Codex:</strong> 20 mins</p>
+                        </div>
+                    </div>
+                    
+                    <div class="timeline-item">
+                        <div class="timeline-dot">3</div>
+                        <div class="timeline-content">
+                            <h4>Add Private Chat Support</h4>
+                            <p>Modify bot to accept private messages + group alerts</p>
+                            <p style="margin-top: 10px;"><strong>With Codex:</strong> 40 mins</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <h3>Phase 2: Data Collection (Days 2-3)</h3>
+                <div class="timeline">
+                    <div class="timeline-item">
+                        <div class="timeline-dot">4</div>
+                        <div class="timeline-content">
+                            <h4>Build Binance RSI Scanner</h4>
+                            <p>Fetch 4H, 1D, 1W data. Calculate RSI. Add volume confirmation.</p>
+                            <p style="margin-top: 10px;"><strong>With Codex:</strong> 1-1.5 hours</p>
+                        </div>
+                    </div>
+                    
+                    <div class="timeline-item">
+                        <div class="timeline-dot">5</div>
+                        <div class="timeline-content">
+                            <h4>Set up Forex Factory Macro Calendar Scraper</h4>
+                            <p>Hourly scrape for upcoming economic events + impact levels</p>
+                            <p style="margin-top: 10px;"><strong>With Codex:</strong> 1 hour</p>
+                        </div>
+                    </div>
+                    
+                    <div class="timeline-item">
+                        <div class="timeline-dot">6</div>
+                        <div class="timeline-content">
+                            <h4>Build ETF Flows Data Scraper</h4>
+                            <p>CoinGlass OR Farside Investors scraper for daily inflow/outflow</p>
+                            <p style="margin-top: 10px;"><strong>With Codex:</strong> 45 mins</p>
+                        </div>
+                    </div>
+                    
+                    <div class="timeline-item">
+                        <div class="timeline-dot">7</div>
+                        <div class="timeline-content">
+                            <h4>Integrate News APIs</h4>
+                            <p>CryptoCompare API + CoinTelegraph RSS for breaking news</p>
+                            <p style="margin-top: 10px;"><strong>With Codex:</strong> 40 mins</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <h3>Phase 3: Morning Digest Assembly (Days 3-4)</h3>
+                <div class="timeline">
+                    <div class="timeline-item">
+                        <div class="timeline-dot">8</div>
+                        <div class="timeline-content">
+                            <h4>Build Morning Digest Template</h4>
+                            <p>Combine all data sources into single formatted message</p>
+                            <p style="margin-top: 10px;"><strong>With Codex:</strong> 1 hour</p>
+                        </div>
+                    </div>
+                    
+                    <div class="timeline-item">
+                        <div class="timeline-dot">9</div>
+                        <div class="timeline-content">
+                            <h4>Build Sentiment Score Calculator</h4>
+                            <p>Combine RSI, volume, ETF flows, liquidations into 0-100 score</p>
+                            <p style="margin-top: 10px;"><strong>With Codex:</strong> 45 mins</p>
+                        </div>
+                    </div>
+                    
+                    <div class="timeline-item">
+                        <div class="timeline-dot">10</div>
+                        <div class="timeline-content">
+                            <h4>Schedule Daily Digest Dispatch</h4>
+                            <p>Set timezone-aware scheduler for 08:00 UTC daily</p>
+                            <p style="margin-top: 10px;"><strong>With Codex:</strong> 30 mins</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <h3>Phase 4: Real-Time Alerts (Days 4-5)</h3>
+                <div class="timeline">
+                    <div class="timeline-item">
+                        <div class="timeline-dot">11</div>
+                        <div class="timeline-content">
+                            <h4>Build RSI Alert Handler</h4>
+                            <p>Real-time checks + volume confirmation + cooldown logic</p>
+                            <p style="margin-top: 10px;"><strong>With Codex:</strong> 1 hour</p>
+                        </div>
+                    </div>
+                    
+                    <div class="timeline-item">
+                        <div class="timeline-dot">12</div>
+                        <div class="timeline-content">
+                            <h4>Build Macro Event Alert Dispatcher</h4>
+                            <p>When upcoming events detected, send alerts with countdown</p>
+                            <p style="margin-top: 10px;"><strong>With Codex:</strong> 45 mins</p>
+                        </div>
+                    </div>
+                    
+                    <div class="timeline-item">
+                        <div class="timeline-dot">13</div>
+                        <div class="timeline-content">
+                            <h4>Build News Alert Handler</h4>
+                            <p>Check news every 5 mins, categorize by importance, alert users</p>
+                            <p style="margin-top: 10px;"><strong>With Codex:</strong> 40 mins</p>
+                        </div>
+                    </div>
+                    
+                    <div class="timeline-item">
+                        <div class="timeline-dot">14</div>
+                        <div class="timeline-content">
+                            <h4>Deploy & Test on Railway</h4>
+                            <p>Full system test with real data, monitor logs, fix edge cases</p>
+                            <p style="margin-top: 10px;"><strong>Time:</strong> 1-2 hours</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <h3>Phase 5: Testing & Refinement (Days 5-14)</h3>
+                <div class="feature-box">
+                    <h4>📋 Testing Checklist</h4>
+                    <ul>
+                        <li>✅ Morning digest sends at 08:00 UTC daily</li>
+                        <li>✅ RSI alerts trigger with volume confirmation</li>
+                        <li>✅ Macro calendar events detected 2+ hours before</li>
+                        <li>✅ ETF data updates daily without errors</li>
+                        <li>✅ News alerts send within 5 mins of breaking news</li>
+                        <li>✅ Powell tone updates work via /update_powell command</li>
+                        <li>✅ Private chats accepted and messages logged</li>
+                        <li>✅ No alert spam (cooldown working)</li>
+                        <li>✅ Bot doesn't crash for 48+ hours continuous</li>
+                        <li>✅ Railway logs clean (no memory leaks)</li>
+                    </ul>
+                </div>
+                
+                <h3>Total Build Time Summary</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Phase</th>
+                            <th>Duration</th>
+                            <th>Work Items</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Phase 1: Core Setup</strong></td>
+                            <td>1.5 hours</td>
+                            <td>Config, commands, private chat</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Phase 2: Data Collection</strong></td>
+                            <td>4 hours</td>
+                            <td>RSI, Calendar, ETF, News APIs</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Phase 3: Digest Assembly</strong></td>
+                            <td>2.5 hours</td>
+                            <td>Digest format, sentiment score, scheduler</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Phase 4: Real-Time Alerts</strong></td>
+                            <td>3 hours</td>
+                            <td>RSI alerts, macro alerts, news alerts, deploy</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Phase 5: Testing</strong></td>
+                            <td>2-4 hours</td>
+                            <td>Edge cases, stability, refinement</td>
+                        </tr>
+                        <tr>
+                            <td><strong>TOTAL</strong></td>
+                            <td><strong>12-14 hours coding</strong></td>
+                            <td>Spread over 3-5 days with breaks</td>
+                        </tr>
+                    </tbody>
+                </table>
+                
+                <div class="success">
+                    <strong>✅ With Codex Pro:</strong> You can realistically complete entire build in <strong>3-5 days</strong> if coding 2-3 hours/day
+                </div>
+            </div>
+            
+            <!-- Market Positioning -->
+            <div class="section">
+                <h2><span class="emoji">🎯</span> Market Positioning & Launch Strategy</h2>
+                
+                <h3>Why This Bot Wins vs Signal Bots</h3>
+                <div class="feature-box">
+                    <ul>
+                        <li><strong>✅ No Legal Risk:</strong> You're analyzing, not predicting/advising</li>
+                        <li><strong>✅ Higher Trust:</strong> Analysts > Bots in traders' minds</li>
+                        <li><strong>✅ Long-Term Retention:</strong> People keep analysts. Signal bots get deleted after wrong calls.</li>
+                        <li><strong>✅ Higher Price Point:</strong> Analysts charge $10-20/month. Signal bots $5-10/month.</li>
+                        <li><strong>✅ Competitive Moat:</strong> Hard to copy quality analysis. Easy to copy signals.</li>
+                    </ul>
+                </div>
+                
+                <h3>Freemium Strategy</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Feature</th>
+                            <th>Free Tier</th>
+                            <th>Premium Tier ($8/month)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Morning Digest</strong></td>
+                            <td>✅ Delayed 2 hours</td>
+                            <td>✅ Real-time (08:00 UTC)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>RSI Alerts</strong></td>
+                            <td>✅ Summary only</td>
+                            <td>✅ Real-time + detailed</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Macro Calendar</strong></td>
+                            <td>✅ Major events only</td>
+                            <td>✅ All events + early warning</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Private Chat</strong></td>
+                            <td>❌</td>
+                            <td>✅ Ask custom questions</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Custom Watchlist</strong></td>
+                            <td>❌</td>
+                            <td>✅ Track any coins</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Analysis Replay</strong></td>
+                            <td>✅ Weekly only</td>
+                            <td>✅ Detailed + historical</td>
+                        </tr>
+                    </tbody>
+                </table>
+                
+                <p style="color: #cbd5e1; margin-top: 15px;"><em>Keep free tier valuable so they see proof. Make premium tier just valuable enough that paying users feel they got upgrade.</em></p>
+                
+                <h3>Launch Phases</h3>
+                
+                <h4>Week 1-2: Private Testing</h4>
+                <div class="feature-box">
+                    <ul>
+                        <li>Add 5-10 crypto traders from your network (friends, Discord communities)</li>
+                        <li>Collect feedback on accuracy, usefulness, format</li>
+                        <li>Run 2 weeks of live signals, track accuracy yourself</li>
+                        <li>Fix bugs based on real data</li>
+                    </ul>
+                </div>
+                
+                <h4>Week 3: Public Showcase</h4>
+                <div class="feature-box">
+                    <ul>
+                        <li>Create <strong>free public Telegram channel</strong> "Crypto Market Analysis"</li>
+                        <li>Share 2-3 morning digests there (your best ones)</li>
+                        <li>Share this link on crypto Discord servers, Reddit, Twitter</li>
+                        <li>Let people see quality of analysis before asking to pay</li>
+                        <li>Build audience of 100-500 free followers</li>
+                    </ul>
+                </div>
+                
+                <h4>Week 4: Paid Bot Launch</h4>
+                <div class="feature-box">
+                    <ul>
+                        <li>Announce premium bot subscription in public channel</li>
+                        <li>Offer "$8/month, first 20 subscribers get 50% off ($4/month) forever"</li>
+                        <li>Emphasize: "Real analysis, not signals. Prove it works before paying."</li>
+                        <li>Expect 5-10 first customers if you've proven value in free channel</li>
+                    </ul>
+                </div>
+                
+                <h3>Marketing Assets (Zero Cost)</h3>
+                
+                <h4>1. Performance Dashboard</h4>
+                <p style="color: #cbd5e1;">Simple Google Sheets showing weekly accuracy. Share publicly. <strong>This is your #1 marketing tool.</strong></p>
+                
+                <h4>2. Past Analyses + Outcomes</h4>
+                <p style="color: #cbd5e1;">Screenshot tweet: "2 weeks ago we called BTC consolidation near support. Here's what happened:" [show chart]. Builds credibility.</p>
+                
+                <h4>3. Referral Program</h4>
+                <p style="color: #cbd5e1;">Each paying subscriber gets referral link. They refer a friend → both get 1 month free. Costs you nothing, grows fast.</p>
+                
+                <h4>4. Educational Content</h4>
+                <p style="color: #cbd5e1;">Share 5-10 posts on X/Twitter: "Why Powell's tone matters for crypto" with educational value. Position yourself as expert.</p>
+            </div>
+            
+            <!-- Configuration Reference -->
+            <div class="section">
+                <h2><span class="emoji">⚙️</span> Configuration Reference</h2>
+                
+                <h3>config.json Structure</h3>
+                <div class="code-block">
+                    <code>{
+  "bot_version": "1.0.0",
+  "testing_phase": true,
+  
+  "telegram": {
+    "bot_token": "YOUR_BOT_TOKEN",
+    "group_chat_id": -1001234567890,
+    "admin_user_id": 123456789
+  },
+  
+  "powell_tone": {
+    "stance": "dovish",
+    "score": 2,
+    "note": "Fed signals patient approach to rate hikes",
+    "last_updated": "2025-04-03",
+    "confidence": "high"
+  },
+  
+  "tracked_coins": ["BTC", "ETH", "SOL", "XRP", "ADA"],
+  
+  "rsi_settings": {
+    "overbought_threshold": 75,
+    "oversold_threshold": 25,
+    "period": 14,
+    "volume_threshold_percent": 15,
+    "alert_cooldown_hours": 6
+  },
+  
+  "macro_calendar": {
+    "enabled": true,
+    "check_interval_minutes": 60,
+    "alert_before_minutes": 120
+  },
+  
+  "etf_settings": {
+    "enabled": true,
+    "check_daily": true,
+    "inflow_alert_threshold": 200000000,
+    "outflow_alert_threshold": 150000000
+  },
+  
+  "news": {
+    "enabled": true,
+    "check_interval_minutes": 5,
+    "importance_levels": ["critical", "high"],
+    "sources": ["cryptocompare", "cointelegraph"]
+  },
+  
+  "digest": {
+    "enabled": true,
+    "time_utc": "08:00",
+    "include_sentiment": true,
+    "include_top_movers": true
+  },
+  
+  "liquidations": {
+    "enabled": true,
+    "extreme_threshold": 500000000,
+    "high_threshold": 250000000
+  }
+}</code>
+                </div>
+                
+                <h3>Update Commands</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Command</th>
+                            <th>Example</th>
+                            <th>Effect</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>/update_powell</code></td>
+                            <td><code>/update_powell dovish 2 "Patient on rates"</code></td>
+                            <td>Updates Powell stance in config</td>
+                        </tr>
+                        <tr>
+                            <td><code>/add_coin</code></td>
+                            <td><code>/add_coin DOGE</code></td>
+                            <td>Add coin to tracking list</td>
+                        </tr>
+                        <tr>
+                            <td><code>/remove_coin</code></td>
+                            <td><code>/remove_coin DOGE</code></td>
+                            <td>Remove coin from tracking</td>
+                        </tr>
+                        <tr>
+                            <td><code>/digest</code></td>
+                            <td><code>/digest</code></td>
+                            <td>Trigger morning digest immediately</td>
+                        </tr>
+                        <tr>
+                            <td><code>/status</code></td>
+                            <td><code>/status</code></td>
+                            <td>Check bot health, uptime</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- Risk & Mitigation -->
+            <div class="section">
+                <h2><span class="emoji">⚠️</span> Risks & Mitigation</h2>
+                
+                <h3>Risk 1: Web Scraper Fragility</h3>
+                <div class="feature-box">
+                    <h4>🔴 Risk:</h4>
+                    <p>Forex Factory or CoinGlass changes HTML structure → scraper breaks</p>
+                    
+                    <h4>✅ Mitigation:</h4>
+                    <ul>
+                        <li>Use try/catch error handling around all scrapers</li>
+                        <li>Implement fallback sources (2-3 backup calendars)</li>
+                        <li>Set up error alerts: "Macro calendar scraper failed, using backup"</li>
+                        <li>Monitor logs daily in testing phase</li>
+                    </ul>
+                </div>
+                
+                <h3>Risk 2: False Signals (RSI)</h3>
+                <div class="feature-box">
+                    <h4>🔴 Risk:</h4>
+                    <p>RSI extreme doesn't always mean reversal (can stay overbought for weeks)</p>
+                    
+                    <h4>✅ Mitigation:</h4>
+                    <ul>
+                        <li><strong>Volume confirmation:</strong> Only alert if volume is 15%+ above average (already built in)</li>
+                        <li><strong>Alert cooldown:</strong> Max 1 alert per coin per 6 hours (prevents spam)</li>
+                        <li>Track accuracy weekly. If below 50%, disable RSI alerts and refine logic</li>
+                        <li>Always include disclaimer: "This is analysis, not financial advice"</li>
+                    </ul>
+                </div>
+                
+                <h3>Risk 3: API Rate Limits</h3>
+                <div class="feature-box">
+                    <h4>🔴 Risk:</h4>
+                    <p>Binance API might rate limit if checking too frequently</p>
+                    
+                    <h4>✅ Mitigation:</h4>
+                    <ul>
+                        <li>Stagger requests: Don't check 10 coins simultaneously</li>
+                        <li>Use exponential backoff for retries</li>
+                        <li>Binance free tier allows 1200 requests/minute (plenty for this bot)</li>
+                    </ul>
+                </div>
+                
+                <h3>Risk 4: Bot Crashes on Railway</h3>
+                <div class="feature-box">
+                    <h4>🔴 Risk:</h4>
+                    <p>Long-running bot can accumulate memory leaks or crash</p>
+                    
+                    <h4>✅ Mitigation:</h4>
+                    <ul>
+                        <li>Set Railway to auto-restart on crash (check Railway settings)</li>
+                        <li>Monitor memory usage in logs daily</li>
+                        <li>Schedule weekly restart at low-traffic time</li>
+                        <li>Use try/catch around all long-running loops</li>
+                    </ul>
+                </div>
+                
+                <h3>Risk 5: Telegram Bot Getting Banned</h3>
+                <div class="feature-box">
+                    <h4>🔴 Risk:</h4>
+                    <p>Spammy alerts → Telegram limits bot for abuse</p>
+                    
+                    <h4>✅ Mitigation:</h4>
+                    <ul>
+                        <li><strong>Alert cooldown:</strong> Max 1 alert per coin per 6 hours</li>
+                        <li>Morning digest = 1 message per day (good)</li>
+                        <li>Real-time alerts = only when meaningful (macro events, extreme RSI)</li>
+                        <li>Monitor Telegram bot settings for warnings</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <!-- Success Metrics -->
+            <div class="section">
+                <h2><span class="emoji">📈</span> Success Metrics (Testing Phase)</h2>
+                
+                <h3>Week 1-2: Functionality</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Target</th>
+                            <th>Actual</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Morning digest sends daily at 08:00 UTC</td>
+                            <td>✅ Yes</td>
+                            <td>[ ]</td>
+                        </tr>
+                        <tr>
+                            <td>RSI alerts trigger with volume confirmation</td>
+                            <td>✅ Yes</td>
+                            <td>[ ]</td>
+                        </tr>
+                        <tr>
+                            <td>Macro calendar detects events 2+ hours before</td>
+                            <td>✅ Yes</td>
+                            <td>[ ]</td>
+                        </tr>
+                        <tr>
+                            <td>Bot uptime without crashing</td>
+                            <td>✅ 48+ hours</td>
+                            <td>[ ]</td>
+                        </tr>
+                        <tr>
+                            <td>Powell update command works instantly</td>
+                            <td>✅ Yes</td>
+                            <td>[ ]</td>
+                        </tr>
+                    </tbody>
+                </table>
+                
+                <h3>Week 3-4: Quality & Accuracy</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Target</th>
+                            <th>Actual</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>False positive rate (RSI alerts)</td>
+                            <td>&lt; 30%</td>
+                            <td>[ ]</td>
+                        </tr>
+                        <tr>
+                            <td>Accuracy of morning digest sentiment</td>
+                            <td>&gt; 60%</td>
+                            <td>[ ]</td>
+                        </tr>
+                        <tr>
+                            <td>News alerts detect major stories within 5 mins</td>
+                            <td>✅ Yes</td>
+                            <td>[ ]</td>
+                        </tr>
+                        <tr>
+                            <td>ETF data updates daily without errors</td>
+                            <td>✅ Yes</td>
+                            <td>[ ]</td>
+                        </tr>
+                        <tr>
+                            <td>No alert spam (cooldown working)</td>
+                            <td>✅ Yes</td>
+                            <td>[ ]</td>
+                        </tr>
+                    </tbody>
+                </table>
+                
+                <h3>Week 4+: User Engagement</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Target</th>
+                            <th>Actual</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Free testers engaged (respond to digests)</td>
+                            <td>50%+</td>
+                            <td>[ ]</td>
+                        </tr>
+                        <tr>
+                            <td>Feedback positive on accuracy</td>
+                            <td>70%+</td>
+                            <td>[ ]</td>
+                        </tr>
+                        <tr>
+                            <td>Public channel followers (free tier)</td>
+                            <td>100-500</td>
+                            <td>[ ]</td>
+                        </tr>
+                        <tr>
+                            <td>Conversion to paid (phase 4)</td>
+                            <td>5-10 customers</td>
+                            <td>[ ]</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- Final Checklist -->
+            <div class="section">
+                <h2><span class="emoji">✅</span> Pre-Launch Checklist</h2>
+                
+                <div class="feature-box">
+                    <h4>Code & Technical</h4>
+                    <ul>
+                        <li>☐ All data sources integrated and tested</li>
+                        <li>☐ Config file management working (no code edits needed)</li>
+                        <li>☐ Error handling on all scrapers (with fallbacks)</li>
+                        <li>☐ Bot deployed to Railway Cloud</li>
+                        <li>☐ 48-hour stability test passed</li>
+                        <li>☐ Railway logs reviewed for memory leaks</li>
+                        <li>☐ All commands tested (/update_powell, /digest, etc.)</li>
+                    </ul>
+                </div>
+                
+                <div class="feature-box">
+                    <h4>Data & Accuracy</h4>
+                    <ul>
+                        <li>☐ RSI calculation verified against TradingView</li>
+                        <li>☐ Volume confirmation logic tested</li>
+                        <li>☐ ETF data matches CoinGlass/Farside</li>
+                        <li>☐ Macro calendar matches Forex Factory</li>
+                        <li>☐ News alerts tested with recent stories</li>
+                        <li>☐ Powell tone assessment documented</li>
+                        <li>☐ 2-week historical accuracy tracked</li>
+                    </ul>
+                </div>
+                
+                <div class="feature-box">
+                    <h4>User Experience</h4>
+                    <ul>
+                        <li>☐ Morning digest formatting clean and readable</li>
+                        <li>☐ Alert messages clear and actionable</li>
+                        <li>☐ No typos or grammar errors</li>
+                        <li>☐ Emojis used consistently</li>
+                        <li>☐ Private chats work smoothly</li>
+                        <li>☐ Test with 5-10 beta users for feedback</li>
+                    </ul>
+                </div>
+                
+                <div class="feature-box">
+                    <h4>Legal & Compliance</h4>
+                    <ul>
+                        <li>☐ Disclaimer added: "This is analysis, not financial advice"</li>
+                        <li>☐ No guarantees on profitability</li>
+                        <li>☐ Methodology documented</li>
+                        <li>☐ No insider trading references</li>
+                        <li>☐ Privacy policy for user data</li>
+                    </ul>
+                </div>
+                
+                <div class="feature-box">
+                    <h4>Marketing & Launch</h4>
+                    <ul>
+                        <li>☐ Performance tracking sheet created</li>
+                        <li>☐ Public Telegram channel set up</li>
+                        <li>☐ Launch announcement drafted</li>
+                        <li>☐ Referral program set up</li>
+                        <li>☐ Pricing decided ($8/month)</li>
+                        <li>☐ Payment method chosen (Stripe, Coinbase, manual)</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <!-- Next Steps -->
+            <div class="section">
+                <h2><span class="emoji">🚀</span> Immediate Next Steps</h2>
+                
+                <div class="feature-box">
+                    <h4>Step 1: Approve This Plan</h4>
+                    <p style="color: #cbd5e1;">Review this HTML document. Are you comfortable with all features and timeline?</p>
+                </div>
+                
+                <div class="feature-box">
+                    <h4>Step 2: Set Up Codex Tasks</h4>
+                    <p style="color: #cbd5e1;">Provide Codex with Phase 1 breakdown. Start with config file + private chat support.</p>
+                </div>
+                
+                <div class="feature-box">
+                    <h4>Step 3: Gather API Credentials</h4>
+                    <p style="color: #cbd5e1;">Get Binance API key, CryptoCompare API key, Railway environment variables ready.</p>
+                </div>
+                
+                <div class="feature-box">
+                    <h4>Step 4: Build & Test Phase 1</h4>
+                    <p style="color: #cbd5e1;">Complete core setup (1.5 hours with Codex). Deploy to Railway, verify working.</p>
+                </div>
+                
+                <div class="feature-box">
+                    <h4>Step 5: Iterate Fast</h4>
+                    <p style="color: #cbd5e1;">Each phase ~4 hours. Feedback from testing improves next phase.</p>
+                </div>
+                
+                <div class="success">
+                    <strong>🎯 Goal:</strong> Have fully functional bot + 2 weeks of testing data by end of Week 4. Then launch public channel + paid tier.
+                </div>
+            </div>
+            
+        </div>
+        
+        <footer>
+            <p>Crypto Analyst Bot - Full Implementation Plan</p>
+            <p>Generated: April 3, 2025 | Testing Phase</p>
+            <p style="margin-top: 15px; color: #64748b;">This is a detailed technical & business plan. Review carefully before committing resources.</p>
+        </footer>
+    </div>
+</body>
+</html>

@@ -583,6 +583,12 @@ def summarize_market_logic(snapshots, pulse):
 async def get_ai_market_summary(session, snapshots, pulse):
     """ Generates a professional AI market summary using Gemini. """
     if not GEMINI_API_KEY:
+        missing_msg = (
+            f"⚠️ <b>GEMINI API KEY MISSING</b>\n\n"
+            f"The `GEMINI_API_KEY` environment variable is not set on Railway.\n"
+            f"<i>The daily digest is falling back to manual logic.</i>"
+        )
+        asyncio.create_task(send_telegram_message(session, ADMIN_USER_ID, missing_msg))
         return summarize_market_logic(snapshots, pulse)
         
     try:

@@ -581,9 +581,9 @@ def summarize_market_logic(snapshots, pulse):
 
 
 async def get_ai_market_summary(snapshots, pulse):
-    """ Generates a professional AI market summary using Gemini. """
+    """ Generates a professional AI market summary using Gemini with diagnostic fallback labels. """
     if not GEMINI_API_KEY:
-        return summarize_market_logic(snapshots, pulse)
+        return summarize_market_logic(snapshots, pulse), "(Fallback)"
         
     try:
         # Prepare context for AI
@@ -601,15 +601,21 @@ async def get_ai_market_summary(snapshots, pulse):
             f"Output only the summary text."
         )
         
-        model = genai.GenerativeModel('gemini-pro')
+        # Upgrade to gemini-1.5-flash (more reliable for free tiers)
+        model = genai.GenerativeModel('gemini-1.5-flash')
         response = await asyncio.to_thread(model.generate_content, prompt)
         
         if response and response.text:
-            return response.text.strip()
+            return response.text.strip(), "(Full AI)"
     except Exception as e:
+        err_str = str(e).lower()
+        status_label = "(API Error)"
+        if "api_key_invalid" in err_str or "400" in err_str:
+            status_label = "(Invalid Key ❌)"
         print(f"🤖 Gemini AI Synthesis failed: {e}. Falling back to manual logic.")
+        return summarize_market_logic(snapshots, pulse), status_label
         
-    return summarize_market_logic(snapshots, pulse)
+    return summarize_market_logic(snapshots, pulse), "(Fallback)"
 
 
 async def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None, macro_partial_failure=False):
@@ -685,8 +691,8 @@ async def build_digest_message(snapshots, pulse, config, top_news=None, upcoming
     lines.append("")
 
     # Market Summary section
-    summary = await get_ai_market_summary(snapshots, pulse)
-    lines.append("📊 <b>Market Summary</b>")
+    summary, ai_status = await get_ai_market_summary(snapshots, pulse)
+    lines.append(f"📊 <b>Market Summary {ai_status}</b>")
     lines.append(f"{html_safe(summary)}")
     lines.append("")
 

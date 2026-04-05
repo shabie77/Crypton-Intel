@@ -607,9 +607,17 @@ async def get_ai_market_summary(session, snapshots, pulse):
             f"Output only the summary text."
         )
         
-        # Upgrade to gemini-1.5-flash (more reliable for free tiers)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = await asyncio.to_thread(model.generate_content, prompt)
+        # Dynamic Model Fallback (Handle regional 404s)
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash-latest')
+            response = await asyncio.to_thread(model.generate_content, prompt)
+        except Exception as flash_err:
+            if "404" in str(flash_err) or "not found" in str(flash_err).lower():
+                print("⚠️ 1.5-Flash not found. Falling back to gemini-pro.")
+                model = genai.GenerativeModel('gemini-pro')
+                response = await asyncio.to_thread(model.generate_content, prompt)
+            else:
+                raise flash_err
         
         if response and response.text:
             return response.text.strip()

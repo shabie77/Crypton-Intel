@@ -113,9 +113,20 @@ def ban_channel(chat_identifier):
     if rows_affected > 0:
         print(f"🚫 Channel Revoked: {chat_identifier}")
         return True
-    else:
-        print(f"⚠️ Error: Could not find '{chat_identifier}' in database. Try using their numerical ID.")
-        return False
+    return False
+
+def revoke_access(chat_id):
+    """ Silently revokes access for a user or channel (handles 403 Forbidden). """
+    conn = _connect()
+    cursor = conn.cursor()
+    chat_id = str(chat_id)
+    # Update channels
+    cursor.execute("UPDATE channels SET status = 'EXPIRED' WHERE channel_id = ?", (chat_id,))
+    # Update users
+    cursor.execute("UPDATE users SET status = 'EXPIRED' WHERE user_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+    print(f"🔇 Access revoked silently for ID: {chat_id}")
 
 def renew_channel(chat_identifier):
     conn = _connect()

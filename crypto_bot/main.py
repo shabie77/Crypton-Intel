@@ -90,6 +90,24 @@ def ist_now():
     ist = utc_now() + timedelta(hours=5, minutes=30)
     return ist.strftime("%Y-%m-%d %I:%M:%S %p IST")
 
+def utc_to_ist(utc_time_str):
+    """ Converts 'HH:MM UTC' string to 'HH:MM IST' string. """
+    try:
+        # Example input: "09:15 UTC"
+        time_part = utc_time_str.split(" ")[0]
+        h, m = map(int, time_part.split(":"))
+        # Add 5h 30m
+        m += 30
+        h += 5 + (m // 60)
+        m %= 60
+        h %= 24
+        period = "AM" if h < 12 else "PM"
+        h_display = h if 0 < h <= 12 else (h - 12 if h > 12 else 12)
+        if h_display == 0: h_display = 12
+        return f"{h_display:02d}:{m:02d} {period} IST"
+    except:
+        return utc_time_str
+
 
 def deep_merge(base, override):
     merged = dict(base)
@@ -238,18 +256,8 @@ async def send_telegram_message(session, chat_id, text):
                 if response.status == 200:
                     return True
                 if response.status == 403:
-                    print(f"Telegram send failed (403) for {chat_id} - User blocked bot or channel revoked.")
-                    # Automatically remove/expire user/channel from DB if possible using existing ban_channel hook
-                    database.ban_channel(str(chat_id))
-                    # Optionally try to mark user EXPIRED if it was a user ID instead of channel
-                    try:
-                        conn = database._connect()
-                        cursor = conn.cursor()
-                        cursor.execute("UPDATE users SET status = 'EXPIRED' WHERE user_id = ?", (str(chat_id),))
-                        conn.commit()
-                        conn.close()
-                    except:
-                        pass
+                    print(f"Telegram send failed (403) for {chat_id} - Revoking access.")
+                    database.revoke_access(str(chat_id))
                     return False
                 print(f"Telegram send failed ({response.status}) for {chat_id}")
         except Exception as exc:
@@ -527,14 +535,35 @@ def calculate_market_pulse(snapshots, config):
     else:
         label = "EXTREME GREED"
 
+    # Dynamic "Watch Next" Logic
     if bullish_count > bearish_count:
-        watch_next = "Watch whether bullish trend breadth holds into the next US session."
+        if score > 75:
+            watch_next = "Watch for potential overextension. Bulls are in control, but profit-taking risk is high."
+        else:
+            watch_next = "Watch for trend continuation. Strong breadth suggests a stable upward trajectory."
     elif bearish_count > bullish_count:
-        watch_next = "Watch whether sellers can keep control or if oversold conditions trigger a relief bounce."
+        if score < 25:
+            watch_next = "Watch for a capitulation bounce. Extreme fear often leads to local reversals."
+        else:
+            watch_next = "Watch for lower lows. Bearish trend structure remains dominant."
     else:
-        watch_next = "Watch for a breakout from the current balance between trend and momentum."
+        watch_next = "Watch for a decisive breakout. Market is compressed and searching for direction."
 
     return {"score": score, "label": label, "watch_next": watch_next}
+
+def summarize_market_logic(snapshots, pulse):
+    """ Generates a short, professional market summary. """
+    bulls = [s for s in snapshots if s and "BULLISH" in s["trend"]]
+    bears = [s for s in snapshots if s and "BEARISH" in s["trend"]]
+    oversold = [s for s in snapshots if s and s["rsi"] < 35]
+    
+    if len(bulls) >= 2:
+        return "Market is showing resilient bullish structure across majors, though volume remains thin."
+    if len(bears) >= 2:
+        if oversold:
+            return f"Heavily bearish momentum, however {oversold[0]['tag']} is approaching oversold territory."
+        return "Broad bearish momentum persists. Institutional flows remain cautious."
+    return "Market is currently in an accumulation phase with mixed signals across the board."
 
 
 def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None, macro_partial_failure=False):
@@ -543,10 +572,27 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
         f"Time: {html_safe(ist_now())}",
         "",
         f"<b>Market Pulse:</b> {pulse['label']} ({pulse['score']}/100)",
-        f"<b>Why it matters:</b> {html_safe(config['powell']['stance'].title())} Fed tone and current trend breadth are shaping risk appetite.",
-        f"<b>Watch next:</b> {html_safe(pulse['watch_next'])}",
-        "",
     ]
+    
+    # 24h Stance Timeout (Powell update)
+    powell = config.get("powell", {})
+    last_updated_str = powell.get("updated_at")
+    show_powell = False
+    if last_updated_str:
+        try:
+            last_ts = datetime.fromisoformat(last_updated_str).timestamp()
+            if (utc_now().timestamp() - last_ts) < 86400: # 24 hours
+                show_powell = True
+        except:
+            pass
+            
+    if show_powell:
+        lines.append(f"<b>Why it matters:</b> {html_safe(config['powell']['stance'].title())} Fed tone and current trend breadth are shaping risk appetite.")
+    else:
+        lines.append(f"<b>Review:</b> Neutral Fed baseline. Market trend breadth and macro inflows are shaping risk appetite.")
+        
+    lines.append(f"<b>Watch next:</b> {html_safe(pulse['watch_next'])}")
+    lines.append("")
     
     # 24h Liquidation Section
     if liq_stats:
@@ -598,11 +644,15 @@ def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro
     if top_news:
         for item in top_news:
             lines.append(f"{item['emoji']} <b>{item['level']}:</b> {html_safe(item['title'])}")
-            lines.append(f"   {html_safe(item['impact'])}")
-            lines.append("")
     else:
-        lines.append("- Market is relatively quiet today.")
-        lines.append("")
+        lines.append("- No major news events recorded in last 24h.")
+    lines.append("")
+
+    # Market Summary section
+    summary = summarize_market_logic(snapshots, pulse)
+    lines.append("📊 <b>Market Summary</b>")
+    lines.append(f"{html_safe(summary)}")
+    lines.append("")
 
     lines.append("---")
     lines.append("(Data Sources: Binance, Trading Economics, CoinTelegraph, CoinGlass)")
@@ -1170,18 +1220,24 @@ async def binance_liquidation_listener(session):
 
                         # Alert logic for specific coins only
                         if symbol in tracked_coins:
-                            # BTC/ETH (Majors) = 50k, others (Beta) = 25k
-                            min_value = 50000 if symbol in ["BTC", "ETH"] else 25000
-                            
-                            if total_value >= min_value:
+                            # User requested less strict: $200k floor for "Small Scale"
+                            if total_value >= 200000:
                                 position_type = "SHORT 🔴" if side == "BUY" else "LONG 🟢"
                                 trend, _ = await get_market_context(session, symbol)
                                 _, confidence, insight = await calculate_confluence_score(total_value, side, trend)
 
-                                # Reduced from 40 to 30 as requested
-                                if confidence >= 30:
+                                # Floor lowered to 25% (Less strict)
+                                if confidence >= 25:
+                                    if confidence >= 75:
+                                        tag = "🔥 HIGH CONFIDENCE"
+                                    elif confidence >= 45:
+                                        tag = "🟠 MODERATE CONFIDENCE"
+                                    else:
+                                        tag = "⚪ SMALL SCALE"
+                                        
                                     alert_message = (
-                                        f"<b>🚀 PREMIUM LIQUIDATION SIGNAL</b>\n\n"
+                                        f"🚀 <b>PREMIUM LIQUIDATION SIGNAL</b>\n\n"
+                                        f"<b>Tier:</b> {tag}\n"
                                         f"<b>Asset:</b> #{pair_to_tag(symbol)}\n"
                                         f"<b>Liquidation:</b> {position_type}\n"
                                         f"<b>Value:</b> ${total_value:,.2f}\n"
@@ -1526,13 +1582,15 @@ async def macro_calendar_loop(session):
                 # Check if event is approx 2 hours away (7200 seconds)
                 time_until = event['timestamp'] - now_ts
                 if 0 < time_until <= 7200:
+                    # Convert UTC to IST for the alert
+                    ist_time = utc_to_ist(event["time"])
+                    
                     alert = (
-                        f"<b>🏛️ MACRO VOLATILITY WARNING</b>\n\n"
+                        f"🏛️ <b>MACRO VOLATILITY WARNING</b>\n\n"
                         f"<b>Event:</b> {html_safe(event['title'])}\n"
                         f"<b>Country:</b> {event['country']}\n"
-                        f"<b>Time:</b> {event['time']}\n\n"
-                        f"<b>Why it matters:</b> This is a High Impact event. Expect significant "
-                        f"volatility in BTC and ETH pairs around this time.\n"
+                        f"<b>Time:</b> {ist_time}\n\n"
+                        f"<b>Why it matters:</b> This is a High Impact event. Expect significant volatility in BTC and ETH pairs around this time.\n"
                         f"<b>Watch next:</b> Ensure your trade positions are secured before the data drops."
                     )
                     
@@ -1616,6 +1674,28 @@ async def telegram_long_polling(session):
 
                     if command == "/help":
                         await send_telegram_message(session, chat_id, build_help_message(is_admin))
+                        continue
+
+                    if command == "/feedback":
+                        if not args:
+                            await send_telegram_message(session, chat_id, "Usage: /feedback <your suggestion>")
+                            continue
+                        
+                        user_info = message.get("from", {})
+                        username = user_info.get("username", "N/A")
+                        first_name = user_info.get("first_name", "User")
+                        
+                        relay_msg = (
+                            f"<b>📬 NEW USER FEEDBACK</b>\n\n"
+                            f"<b>From:</b> {html_safe(first_name)} (@{html_safe(username)})\n"
+                            f"<b>ID:</b> <code>{chat_id}</code>\n\n"
+                            f"<b>Suggestion:</b>\n{html_safe(args)}"
+                        )
+                        
+                        # Forward to Admin
+                        await send_telegram_message(session, ADMIN_USER_ID, relay_msg)
+                        # Confirm to User
+                        await send_telegram_message(session, chat_id, "✅ Thank you! Your feedback has been sent to the developers.")
                         continue
 
                     if is_admin and command.startswith("/"):

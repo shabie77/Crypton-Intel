@@ -580,10 +580,10 @@ def summarize_market_logic(snapshots, pulse):
     return "Market is currently in an accumulation phase with mixed signals across the board."
 
 
-async def get_ai_market_summary(snapshots, pulse):
-    """ Generates a professional AI market summary using Gemini with diagnostic fallback labels. """
+async def get_ai_market_summary(session, snapshots, pulse):
+    """ Generates a professional AI market summary using Gemini. """
     if not GEMINI_API_KEY:
-        return summarize_market_logic(snapshots, pulse), "(Fallback)"
+        return summarize_market_logic(snapshots, pulse)
         
     try:
         # Prepare context for AI
@@ -606,19 +606,27 @@ async def get_ai_market_summary(snapshots, pulse):
         response = await asyncio.to_thread(model.generate_content, prompt)
         
         if response and response.text:
-            return response.text.strip(), "(Full AI)"
+            return response.text.strip()
     except Exception as e:
         err_str = str(e).lower()
         status_label = "(API Error)"
         if "api_key_invalid" in err_str or "400" in err_str:
             status_label = "(Invalid Key ❌)"
+            
         print(f"🤖 Gemini AI Synthesis failed: {e}. Falling back to manual logic.")
-        return summarize_market_logic(snapshots, pulse), status_label
+        # Private Alert for Admin
+        alert_msg = (
+            f"⚠️ <b>GEMINI AI FAILURE</b>\n\n"
+            f"<b>Error:</b> {html_safe(str(e))}\n"
+            f"<b>Status:</b> {status_label}\n\n"
+            f"<i>The daily digest is falling back to manual logic. Please check your API key on Railway.</i>"
+        )
+        asyncio.create_task(send_telegram_message(session, ADMIN_USER_ID, alert_msg))
         
-    return summarize_market_logic(snapshots, pulse), "(Fallback)"
+    return summarize_market_logic(snapshots, pulse)
 
 
-async def build_digest_message(snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None, macro_partial_failure=False):
+async def build_digest_message(session, snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None, macro_partial_failure=False):
     lines = [
         "📰 <b>DAILY MARKET DIGEST</b>",
         f"Time: {html_safe(ist_now())}",
@@ -691,8 +699,8 @@ async def build_digest_message(snapshots, pulse, config, top_news=None, upcoming
     lines.append("")
 
     # Market Summary section
-    summary, ai_status = await get_ai_market_summary(snapshots, pulse)
-    lines.append(f"📊 <b>Market Summary {ai_status}</b>")
+    summary = await get_ai_market_summary(session, snapshots, pulse)
+    lines.append("📊 <b>Market Summary</b>")
     lines.append(f"{html_safe(summary)}")
     lines.append("")
 
@@ -1103,7 +1111,7 @@ async def send_daily_digest(session, target_date_str, mark_as_sent=True):
     
     pulse = calculate_market_pulse(snapshots, config)
     digest = await build_digest_message(
-        snapshots, pulse, config, 
+        session, snapshots, pulse, config, 
         top_news=top_news, 
         upcoming_macro=upcoming_macro, 
         liq_stats=liq_stats,

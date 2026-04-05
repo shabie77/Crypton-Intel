@@ -594,13 +594,17 @@ async def call_gemini_rest(session, prompt):
                 elif resp.status == 404:
                     print(f"⚠️ Model {model_name} not found (404). Trying next...")
                     continue
+                elif resp.status == 429:
+                    raise Exception("Quota Exceeded (429) - Too many requests to Gemini Free Tier.")
                 else:
                     error_body = await resp.text()
-                    print(f"❌ Gemini API error ({resp.status}) for {model_name}: {error_body[:200]}")
-                    return None
+                    raise Exception(f"Gemini API error ({resp.status}): {error_body[:100]}")
         except Exception as e:
+            if "Quota Exceeded" in str(e):
+                raise e
             print(f"❌ Gemini REST call failed for {model_name}: {e}")
-            return None
+            if model_name == GEMINI_MODELS[-1]: # Only raise on the LAST model
+                raise e
     return None
 
 
@@ -637,11 +641,11 @@ async def get_ai_market_summary(session, snapshots, pulse):
         print(f"🤖 Gemini AI Synthesis failed: {e}. Falling back to manual logic.")
         alert_msg = (
             f"⚠️ <b>GEMINI AI FAILURE</b>\n\n"
-            f"<b>Error:</b> {html_safe(str(e))}\n\n"
+            f"<b>Error Detail:</b> {html_safe(str(e))}\n\n"
             f"<i>The daily digest is falling back to manual logic.</i>"
         )
         asyncio.create_task(send_telegram_message(session, ADMIN_USER_ID, alert_msg))
-        
+    
     return summarize_market_logic(snapshots, pulse)
 
 

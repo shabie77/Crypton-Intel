@@ -237,6 +237,20 @@ async def send_telegram_message(session, chat_id, text):
             ) as response:
                 if response.status == 200:
                     return True
+                if response.status == 403:
+                    print(f"Telegram send failed (403) for {chat_id} - User blocked bot or channel revoked.")
+                    # Automatically remove/expire user/channel from DB if possible using existing ban_channel hook
+                    database.ban_channel(str(chat_id))
+                    # Optionally try to mark user EXPIRED if it was a user ID instead of channel
+                    try:
+                        conn = database._connect()
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE users SET status = 'EXPIRED' WHERE user_id = ?", (str(chat_id),))
+                        conn.commit()
+                        conn.close()
+                    except:
+                        pass
+                    return False
                 print(f"Telegram send failed ({response.status}) for {chat_id}")
         except Exception as exc:
             print(f"Telegram send error on attempt {attempt + 1}: {exc}")
@@ -341,8 +355,9 @@ def classify_news_importance(title):
 
 
 async def get_market_context(session, symbol):
+    pair = symbol_to_pair(symbol)
     url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol.upper(), "interval": "4h", "limit": 50}
+    params = {"symbol": pair, "interval": "4h", "limit": 50}
     candles = await fetch_with_backoff(session, url, params)
     if candles:
         close_prices = [float(candle[4]) for candle in candles]

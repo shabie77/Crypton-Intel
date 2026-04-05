@@ -29,12 +29,15 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Gemini AI status
+# Gemini/Groq AI status
 if GEMINI_API_KEY:
-    print("🤖 Gemini AI Intelligence Layer initialized (Direct REST API).")
-else:
-    print("⚠️ Gemini API Key missing. Bot will use manual market summary logic.")
+    print(f"🤖 Gemini AI Intelligence Layer initialized (Primary).")
+if GROQ_API_KEY:
+    print(f"🧠 Groq AI Failover Layer initialized (Backup).")
+if not GEMINI_API_KEY and not GROQ_API_KEY:
+    print("⚠️ AI API Keys missing. Bot will use manual market summary logic.")
 
 RSI_STATE_FILE = os.getenv("RSI_STATE_FILE", os.path.join(DATA_DIR, "rsi_state.json"))
 LAST_DIGEST_FILE = os.getenv("LAST_DIGEST_FILE", os.path.join(DATA_DIR, "last_digest.txt"))
@@ -608,12 +611,40 @@ async def call_gemini_rest(session, prompt):
     return None
 
 
+async def call_groq_rest(session, prompt):
+    """Calls Groq REST API (High-speed Backup) via aiohttp."""
+    if not GROQ_API_KEY:
+        return None
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+        "max_tokens": 512
+    }
+    try:
+        async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if text:
+                    print(f"🧠 Groq AI success (Llama 3.3).")
+                    return text.strip()
+            else:
+                body = await resp.text()
+                print(f"❌ Groq API error ({resp.status}): {body[:100]}")
+    except Exception as e:
+        print(f"❌ Groq REST call failed: {e}")
+    return None
+
+
 async def get_ai_market_summary(session, snapshots, pulse):
-    """ Generates a professional AI market summary using Gemini REST API. """
-    if not GEMINI_API_KEY:
+    """ Generates a professional AI market summary with Gemini -> Groq failover. """
+    if not GEMINI_API_KEY and not GROQ_API_KEY:
         missing_msg = (
-            f"⚠️ <b>GEMINI API KEY MISSING</b>\n\n"
-            f"The `GEMINI_API_KEY` environment variable is not set on Railway.\n"
+            f"⚠️ <b>AI ENGINE OFFLINE</b>\n\n"
+            f"Both `GEMINI_API_KEY` and `GROQ_API_KEY` are missing on Railway.\n"
             f"<i>The daily digest is falling back to manual logic.</i>"
         )
         asyncio.create_task(send_telegram_message(session, ADMIN_USER_ID, missing_msg))
@@ -634,18 +665,31 @@ async def get_ai_market_summary(session, snapshots, pulse):
             f"Output only the summary text."
         )
         
-        result = await call_gemini_rest(session, prompt)
-        if result:
-            return result
-    except Exception as e:
-        print(f"🤖 Gemini AI Synthesis failed: {e}. Falling back to manual logic.")
-        alert_msg = (
-            f"⚠️ <b>GEMINI AI FAILURE</b>\n\n"
-            f"<b>Error Detail:</b> {html_safe(str(e))}\n\n"
-            f"<i>The daily digest is falling back to manual logic.</i>"
-        )
-        asyncio.create_task(send_telegram_message(session, ADMIN_USER_ID, alert_msg))
-    
+        # Primary: Gemini
+        try:
+            result = await call_gemini_rest(session, prompt)
+            if result:
+                return result
+        except Exception as e:
+            # If Gemini QUOTA EXCEEDED (429), Jump instantly to Groq
+            if "Quota Exceeded" in str(e) or "429" in str(e):
+                print("🔄 Gemini Quota reached. Switching to Groq Backup Brain...")
+                groq_result = await call_groq_rest(session, prompt)
+                if groq_result:
+                    return groq_result
+            
+            # For other errors, still alert but fallback to manual
+            print(f"🤖 Gemini AI Synthesis failed: {e}. Falling back to manual logic.")
+            alert_msg = (
+                f"⚠️ <b>GEMINI AI FAILURE</b>\n\n"
+                f"<b>Error Detail:</b> {html_safe(str(e))}\n\n"
+                f"<i>The daily digest is falling back to manual logic.</i>"
+            )
+            asyncio.create_task(send_telegram_message(session, ADMIN_USER_ID, alert_msg))
+            
+    except Exception as total_exc:
+        print(f"❌ TOTAL AI LAYER FAILURE: {total_exc}")
+        
     return summarize_market_logic(snapshots, pulse)
 
 

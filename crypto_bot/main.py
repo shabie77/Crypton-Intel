@@ -1090,6 +1090,7 @@ def build_help_message(is_admin):
         "/users — list active DM users",
         "/send &lt;message&gt; — broadcast to users and channels",
         "/digest — send the digest immediately",
+        "/test_digest — send a private test digest to admin",
         "/update_powell &lt;stance&gt; &lt;score&gt; &lt;note&gt;",
         "/update_etf &lt;summary&gt;",
         "/update_coins &lt;add/remove&gt; &lt;symbol&gt;",
@@ -1099,7 +1100,7 @@ def build_help_message(is_admin):
     return "\n".join(common_lines + [""] + admin_lines)
 
 
-async def send_daily_digest(session, target_date_str, mark_as_sent=True):
+async def send_daily_digest(session, target_date_str, mark_as_sent=True, target_chat_id=None):
     config = await load_config()
     snapshots = []
     for symbol in config["digest"]["symbols"]:
@@ -1123,11 +1124,19 @@ async def send_daily_digest(session, target_date_str, mark_as_sent=True):
         liq_stats=liq_stats,
         macro_partial_failure=macro_data.get("partial_failure", False) and not upcoming_macro
     )
-    sent = await broadcast_message(session, digest)
-    database.log_alert("daily_digest", "MULTI", digest, iso_now())
-    if mark_as_sent:
-        mark_digest_sent(target_date_str)
-    print(f"Daily Digest sent to {sent} recipients.")
+    
+    if target_chat_id:
+        success = await send_telegram_message(session, target_chat_id, digest)
+        sent = 1 if success else 0
+        database.log_alert("test_digest", "ADMIN", digest, iso_now())
+        print(f"Test Digest sent to admin ({target_chat_id}).")
+    else:
+        sent = await broadcast_message(session, digest)
+        database.log_alert("daily_digest", "MULTI", digest, iso_now())
+        if mark_as_sent:
+            mark_digest_sent(target_date_str)
+        print(f"Daily Digest sent to {sent} recipients.")
+        
     return digest
 
 
@@ -1341,7 +1350,8 @@ async def register_admin_commands(session):
         {"command": "status", "description": "Show bot health"},
         {"command": "macro", "description": "Audit upcoming macro events"},
         {"command": "channels", "description": "List active channels"},
-        {"command": "users", "description": "List active DM users"}
+        {"command": "users", "description": "List active DM users"},
+        {"command": "test_digest", "description": "Test digest privately"}
     ]
 
     try:
@@ -1508,7 +1518,13 @@ async def handle_admin_command(session, command, args, chat_id):
     if command == "/digest":
         target_date_str = utc_now().strftime("%Y-%m-%d")
         await send_daily_digest(session, target_date_str, mark_as_sent=False)
-        await send_telegram_message(session, chat_id, "Digest sent manually.")
+        await send_telegram_message(session, chat_id, "Digest broadcasted manually.")
+        return
+
+    if command == "/test_digest":
+        target_date_str = utc_now().strftime("%Y-%m-%d")
+        await send_daily_digest(session, target_date_str, mark_as_sent=False, target_chat_id=chat_id)
+        # Test digest sends a confirmation inside the digest engine output or can be silent.
         return
 
     if command == "/help":

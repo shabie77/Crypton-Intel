@@ -12,6 +12,9 @@ from bs4 import BeautifulSoup
 import xml.etree.ElementTree as ET
 
 import database
+from utils.gemini_rotator import GeminiRotator
+from webhook_server import run_webhook_server
+
 
 load_dotenv()
 
@@ -34,11 +37,12 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Gemini/Groq AI status
-if GEMINI_API_KEY:
-    print(f"🤖 Gemini AI Intelligence Layer initialized (Primary).")
+gemini_rotator = GeminiRotator()
+if gemini_rotator.has_keys():
+    print(f"🤖 Gemini AI Intelligence Layer initialized ({len(gemini_rotator.get_all_keys())} keys).")
 if GROQ_API_KEY:
     print(f"🧠 Groq AI Failover Layer initialized (Backup).")
-if not GEMINI_API_KEY and not GROQ_API_KEY:
+if not gemini_rotator.has_keys() and not GROQ_API_KEY:
     print("⚠️ AI API Keys missing. Bot will use manual market summary logic.")
 
 RSI_STATE_FILE = os.getenv("RSI_STATE_FILE", os.path.join(DATA_DIR, "rsi_state.json"))
@@ -281,16 +285,32 @@ async def send_telegram_message(session, chat_id, text):
 
 
 async def broadcast_message(session, text, include_channels=True, include_users=True):
-    recipients = []
-    if include_channels:
-        recipients.extend(database.get_active_channels())
-    if include_users:
-        recipients.extend(database.get_active_users())
-
     sent = 0
-    for chat_id in sorted(set(recipients)):
-        if await send_telegram_message(session, chat_id, text):
-            sent += 1
+    
+    # 1. Channels (Always receive everything)
+    if include_channels:
+        channels = await asyncio.to_thread(database.get_active_channels)
+        for chat_id in set(channels):
+            if await send_telegram_message(session, chat_id, text):
+                sent += 1
+
+    # 2. Users (Pro Tier get filtered content)
+    if include_users:
+        users = await asyncio.to_thread(database.get_active_users)
+        for user_id in set(users):
+            tier = await asyncio.to_thread(database.get_user_tier, user_id)
+            if tier == 'pro':
+                watchlist = await asyncio.to_thread(database.get_watchlist, user_id)
+                if watchlist:
+                    # Case-insensitive check if any watchlist coin is mentioned in the alert
+                    # This fulfills the promise: "Every digest & alert follows YOUR watchlist"
+                    mention_found = any(coin.upper() in text.upper() for coin in watchlist)
+                    if not mention_found:
+                        continue
+            
+            if await send_telegram_message(session, user_id, text):
+                sent += 1
+                
     return sent
 
 
@@ -584,32 +604,47 @@ GEMINI_MODELS = ["gemini-2.0-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"
 
 
 async def call_gemini_rest(session, prompt):
-    """Calls Gemini REST API directly via aiohttp. Tries multiple models."""
-    for model_name in GEMINI_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        try:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                    if text:
-                        print(f"🤖 Gemini AI success via model: {model_name}")
-                        return text.strip()
-                elif resp.status == 404:
-                    print(f"⚠️ Model {model_name} not found (404). Trying next...")
-                    continue
-                elif resp.status == 429:
-                    raise Exception("Quota Exceeded (429) - Too many requests to Gemini Free Tier.")
-                else:
-                    error_body = await resp.text()
-                    raise Exception(f"Gemini API error ({resp.status}): {error_body[:100]}")
-        except Exception as e:
-            if "Quota Exceeded" in str(e):
-                raise e
-            print(f"❌ Gemini REST call failed for {model_name}: {e}")
-            if model_name == GEMINI_MODELS[-1]: # Only raise on the LAST model
-                raise e
+    """Calls Gemini REST API via aiohttp with key rotation and model failover."""
+    if not gemini_rotator.has_keys():
+        return None
+
+    # Try up to N times where N is number of keys
+    for _ in range(len(gemini_rotator.get_all_keys())):
+        reserved_index, key = await gemini_rotator.reserve_key()
+        if not key:
+            return None
+        
+        for model_name in GEMINI_MODELS:
+            url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={key}"
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            try:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        candidates = data.get("candidates", [])
+                        if candidates and "content" in candidates[0]:
+                            text = candidates[0]["content"].get("parts", [{}])[0].get("text", "")
+                            if text:
+                                return text.strip()
+                        else:
+                            print(f"⚠️ Gemini Safety Filter Block or empty response: {data}")
+                            continue
+                    elif resp.status == 404:
+                        # Model not supported by this key or region, try next model
+                        continue
+                    elif resp.status == 429:
+                        print(f"⚠️ Gemini Key 429 (Rate Limit). Rotating...")
+                        await gemini_rotator.advance_after_rate_limit(reserved_index)
+                        break # Try the next key
+                    else:
+                        error_body = await resp.text()
+                        print(f"❌ Gemini API error ({resp.status}): {error_body[:100]}")
+                        # Other errors (500, etc) might be temporary, try next model or next key
+                        continue
+            except Exception as e:
+                print(f"❌ Gemini call error: {e}")
+                continue
+                
     return None
 
 
@@ -643,7 +678,7 @@ async def call_groq_rest(session, prompt):
 
 async def get_ai_market_summary(session, snapshots, pulse):
     """ Generates a professional AI market summary with Gemini -> Groq failover. """
-    if not GEMINI_API_KEY and not GROQ_API_KEY:
+    if not gemini_rotator.has_keys() and not GROQ_API_KEY:
         missing_msg = (
             f"⚠️ <b>AI ENGINE OFFLINE</b>\n\n"
             f"Both `GEMINI_API_KEY` and `GROQ_API_KEY` are missing on Railway.\n"
@@ -1125,12 +1160,15 @@ async def build_status_message():
     config = await load_config()
     uptime = utc_now() - STARTED_AT
     tracked = ", ".join(config["tracked_coins"])
+    active_chans = await asyncio.to_thread(database.get_active_channels)
+    active_users = await asyncio.to_thread(database.get_active_users)
+
     return (
         "<b>Bot Status</b>\n"
         f"- <b>Uptime:</b> {str(uptime).split('.')[0]}\n"
         f"- <b>Tracked Coins:</b> {html_safe(tracked)}\n"
-        f"- <b>Channels:</b> {len(database.get_active_channels())}\n"
-        f"- <b>Users:</b> {len(database.get_active_users())}\n"
+        f"- <b>Channels:</b> {len(active_chans)}\n"
+        f"- <b>Users:</b> {len(active_users)}\n"
         f"- <b>Data Dir:</b> <code>{html_safe(DATA_DIR)}</code>"
     )
 
@@ -1138,66 +1176,103 @@ async def build_status_message():
 def build_help_message(is_admin):
     common_lines = [
         "<b>Available Commands</b>",
-        "/start — register and receive updates in DM",
-        "/help — show command list",
+        "/start — Register for DM updates",
+        "/mycoins — Manage your coin watchlist",
+        "/upgrade — Upgrade to Pro tier",
+        "/feedback &lt;text&gt; — Send feedback",
+        "/help — Show command list",
     ]
     if not is_admin:
         return "\n".join(common_lines)
 
     admin_lines = [
-        "/status — bot health summary",
-        "/channels — list active channels",
-        "/users — list active DM users",
-        "/send &lt;message&gt; — broadcast to users and channels",
-        "/digest — send the digest immediately",
-        "/test_digest — send a private test digest to admin",
+        "<b>Admin Commands</b>",
+        "/status — Bot health summary",
+        "/channels — List active channels",
+        "/users — List active DM users",
+        "/send &lt;message&gt; — Broadcast message",
+        "/digest — Broadcast digest now",
+        "/test_digest — Private test digest",
         "/update_powell &lt;stance&gt; &lt;score&gt; &lt;note&gt;",
         "/update_etf &lt;summary&gt;",
         "/update_coins &lt;add/remove&gt; &lt;symbol&gt;",
-        "/revoke &lt;channel name or id&gt;",
-        "/renew &lt;channel name or id&gt;",
+        "/revoke &lt;name/id&gt;",
+        "/renew &lt;name/id&gt;",
     ]
     return "\n".join(common_lines + [""] + admin_lines)
 
 
+
 async def send_daily_digest(session, target_date_str, mark_as_sent=True, target_chat_id=None):
     config = await load_config()
-    snapshots = []
-    for symbol in config["digest"]["symbols"]:
-        snapshots.append(await fetch_symbol_snapshot(session, symbol, config))
-
+    
+    # 1. Fetch shared context (Macro, Liq, News) to reuse across users
     top_news = await fetch_top_news(session)
-    # Fetch 24h Macro Events
     macro_data = await fetch_macro_events(session)
-    # Always use events if they exist, regardless of overall success flag
     upcoming_macro = macro_data["events"] if macro_data.get("events") else []
-    
-    # Fetch 24h Liquidation Stats
     cutoff_iso = (utc_now() - timedelta(hours=24)).isoformat()
-    liq_stats = database.get_24h_liquidation_stats(cutoff_iso)
-    
-    pulse = calculate_market_pulse(snapshots, config)
-    digest = await build_digest_message(
-        session, snapshots, pulse, config, 
-        top_news=top_news, 
-        upcoming_macro=upcoming_macro, 
-        liq_stats=liq_stats,
-        macro_partial_failure=macro_data.get("partial_failure", False) and not upcoming_macro
-    )
-    
-    if target_chat_id:
-        success = await send_telegram_message(session, target_chat_id, digest)
-        sent = 1 if success else 0
-        database.log_alert("test_digest", "ADMIN", digest, iso_now())
-        print(f"Test Digest sent to admin ({target_chat_id}).")
-    else:
-        sent = await broadcast_message(session, digest)
-        database.log_alert("daily_digest", "MULTI", digest, iso_now())
-        if mark_as_sent:
-            mark_digest_sent(target_date_str)
-        print(f"Daily Digest sent to {sent} recipients.")
+    liq_stats = await asyncio.to_thread(database.get_24h_liquidation_stats, cutoff_iso)
+
+    async def build_content(symbols_list):
+        snapshots = []
+        for symbol in symbols_list:
+            snapshots.append(await fetch_symbol_snapshot(session, symbol, config))
         
-    return digest
+        pulse = calculate_market_pulse(snapshots, config)
+        return await build_digest_message(
+            session, snapshots, pulse, config, 
+            top_news=top_news, 
+            upcoming_macro=upcoming_macro, 
+            liq_stats=liq_stats,
+            macro_partial_failure=macro_data.get("partial_failure", False) and not upcoming_macro
+        )
+
+    # 2. Prepare Global Content (for Free users and Channels)
+    global_digest = await build_content(config["digest"]["symbols"])
+
+    if target_chat_id:
+        # Handle specific target (e.g., test command)
+        tier = await asyncio.to_thread(database.get_user_tier, target_chat_id)
+        digest_to_send = global_digest
+        if tier == 'pro':
+            watchlist = await asyncio.to_thread(database.get_watchlist, target_chat_id)
+            if watchlist:
+                digest_to_send = await build_content(watchlist)
+        
+        success = await send_telegram_message(session, target_chat_id, digest_to_send)
+        await asyncio.to_thread(database.log_alert, "test_digest", "ADMIN", digest_to_send, iso_now())
+        return digest_to_send
+
+    # 3. Broadcast Mode
+    sent = 0
+    # Process Channels (Always Global)
+    active_channels = await asyncio.to_thread(database.get_active_channels)
+    for chat_id in set(active_channels):
+        if await send_telegram_message(session, chat_id, global_digest):
+            sent += 1
+            
+    # Process Users (Personalize for Pro)
+    active_users = await asyncio.to_thread(database.get_active_users)
+    for user_id in set(active_users):
+        tier = await asyncio.to_thread(database.get_user_tier, user_id)
+        if tier == 'pro':
+            watchlist = await asyncio.to_thread(database.get_watchlist, user_id)
+            if watchlist:
+                # Build custom content for this specific Pro user
+                user_digest = await build_content(watchlist)
+                if await send_telegram_message(session, user_id, user_digest):
+                    sent += 1
+                continue
+        
+        # Free users or Pro without watchlist get global content
+        if await send_telegram_message(session, user_id, global_digest):
+            sent += 1
+
+    await asyncio.to_thread(database.log_alert, "daily_digest", "MULTI", global_digest, iso_now())
+    if mark_as_sent:
+        mark_digest_sent(target_date_str)
+    print(f"Daily Digest sent to {sent} recipients.")
+    return global_digest
 
 
 async def rsi_scanner_loop(session):
@@ -1258,7 +1333,7 @@ async def rsi_scanner_loop(session):
                             f"<b>Watch next:</b> Confirm follow-through before treating it as a reversal."
                         )
                         sent = await broadcast_message(session, alert)
-                        database.log_alert("rsi_alert", pair, alert, iso_now())
+                        await asyncio.to_thread(database.log_alert, "rsi_alert", pair, alert, iso_now())
                         state["last_alert_at"] = utc_now().isoformat()
                         print(f"RSI Alert sent: {pair} {interval} {current_state} to {sent} recipients")
 
@@ -1341,7 +1416,7 @@ async def binance_liquidation_listener(session):
                         total_value = price * qty
                         
                         # Store EVERYTHING for global market accuracy
-                        database.log_liquidation(symbol, side, total_value, iso_now())
+                        await asyncio.to_thread(database.log_liquidation, symbol, side, total_value, iso_now())
 
                         # Alert logic for specific coins only
                         if symbol in tracked_coins:
@@ -1372,7 +1447,7 @@ async def binance_liquidation_listener(session):
                                         f"<i>Disclaimer: Market analysis only, not financial advice.</i>"
                                     )
                                     await broadcast_message(session, alert_message)
-                                    database.log_alert("liquidation", symbol, alert_message, iso_now())
+                                    await asyncio.to_thread(database.log_alert, "liquidation", symbol, alert_message, iso_now())
 
         except Exception as exc:
             retry_count += 1
@@ -1401,8 +1476,11 @@ async def register_admin_commands(session):
     common_commands = [
         {"command": "start", "description": "Register for alerts"},
         {"command": "help", "description": "Show command list"},
+        {"command": "mycoins", "description": "Manage your coin watchlist"},
+        {"command": "upgrade", "description": "Upgrade to Pro tier"},
         {"command": "feedback", "description": "Send suggestion/feedback"}
     ]
+
     
     # Admin-only commands (Scoped to ADMIN_USER_ID)
     admin_only = common_commands + [
@@ -1433,15 +1511,71 @@ async def handle_admin_command(session, command, args, chat_id):
         return
 
     if command == "/channels":
-        channels = [row for row in database.get_all_channels() if row[2] == "ACTIVE"]
+        all_chans = await asyncio.to_thread(database.get_all_channels)
+        channels = [row for row in all_chans if row[2] == "ACTIVE"]
         lines = ["<b>Active Channels</b>"] + [format_channel_label(row) for row in channels] if channels else ["No channels found."]
         await send_telegram_message(session, chat_id, "\n".join(lines))
         return
 
     if command == "/users":
-        users = [row for row in database.get_all_users() if row[3] == "ACTIVE"]
+        all_users = await asyncio.to_thread(database.get_all_users)
+        users = [row for row in all_users if row[3] == "ACTIVE"]
         lines = ["<b>Registered Users</b>"] + [format_user_label(row) for row in users] if users else ["No users found."]
         await send_telegram_message(session, chat_id, "\n".join(lines))
+        return
+
+    if command == "/setpro":
+        if not args or not args.isdigit():
+            await send_telegram_message(session, chat_id, "❌ Usage: /setpro <user_id>")
+            return
+        target_user = args.strip()
+        await asyncio.to_thread(database.set_user_tier, chat_id, target_user, "pro")
+        await send_telegram_message(session, chat_id, f"✅ User {target_user} upgraded to Pro.")
+        # Notify user
+        await send_telegram_message(
+            session,
+            target_user,
+            "🌟 <b>ADMIN UPGRADE</b>\n\n"
+            "Your account has been upgraded to <b>Pro Tier</b>.\n"
+            "You now have access to personalized analysis and advanced alerts.\n\n"
+            "Use /mycoins to set your watchlist.",
+        )
+        return
+
+    if command == "/setfree":
+        if not args or not args.isdigit():
+            await send_telegram_message(session, chat_id, "❌ Usage: /setfree <user_id>")
+            return
+        target_user = args.strip()
+        await asyncio.to_thread(database.set_user_tier, chat_id, target_user, "free")
+        await send_telegram_message(session, chat_id, f"⚠️ User {target_user} moved to Free tier.")
+        # Notify user
+        await send_telegram_message(
+            session,
+            target_user,
+            "⚠️ <b>ACCOUNT UPDATE</b>\n\n"
+            "Your account has been moved to the Free tier.\n"
+            "Some premium features are now limited. Upgrade anytime with /upgrade.",
+        )
+        return
+
+    if command == "/listusers":
+        users = await asyncio.to_thread(database.get_all_users_with_tiers)
+        total = len(users)
+        lines = []
+        for u in users:
+            uid, uname, tier, expiry = u
+            label = f"@{uname}" if uname else uid
+            if tier == "pro":
+                exp_date = expiry[:10] if expiry else "N/A"
+                lines.append(f"💎 {label} — Pro (Exp: {exp_date})")
+            else:
+                lines.append(f"🆓 {label} — Free")
+        
+        for i in range(0, len(lines), 20):
+            chunk = lines[i:i+20]
+            header = f"👥 <b>User Directory</b> (Total: {total})\n\n" if i == 0 else ""
+            await send_telegram_message(session, chat_id, header + "\n".join(chunk))
         return
 
     if command == "/send":
@@ -1675,7 +1809,7 @@ async def news_checker_loop(session):
                     )
 
                     await broadcast_message(session, alert)
-                    database.log_alert("breaking_news", "MULTI", alert, iso_now())
+                    await asyncio.to_thread(database.log_alert, "breaking_news", "MULTI", alert, iso_now())
                     new_alerts_sent = True
                     print(f"Breaking news alert sent: {title[:60]}")
 
@@ -1843,6 +1977,60 @@ async def telegram_long_polling(session):
                         await send_telegram_message(session, chat_id, "✅ Thank you! Your feedback has been sent to the developers.")
                         continue
 
+                    if command == "/mycoins":
+                        if not args:
+                            coins = await asyncio.to_thread(database.get_watchlist, chat_id)
+                            if coins:
+                                await send_telegram_message(session, chat_id, f"✅ Current Watchlist: {', '.join(coins)}")
+                            else:
+                                await send_telegram_message(session, chat_id, "Your watchlist is empty. Set it using <code>/mycoins BTC ETH SOL</code>")
+                            continue
+                        
+                        if args.lower() == "clear":
+                            await asyncio.to_thread(database.clear_watchlist, chat_id)
+                            await send_telegram_message(session, chat_id, "✅ Watchlist cleared.")
+                            continue
+                        
+                        # Save new watchlist (Fix 6: Deduplicate inputs)
+                        new_coins = list(dict.fromkeys([c.strip().upper() for c in args.split() if c.strip()]))
+                        if not new_coins:
+                            await send_telegram_message(session, chat_id, "Usage: <code>/mycoins BTC ETH SOL</code>")
+                            continue
+
+                        await asyncio.to_thread(database.save_watchlist, chat_id, new_coins)
+                        
+                        tier = await asyncio.to_thread(database.get_user_tier, chat_id)
+                        msg = f"✅ Watchlist saved — {', '.join(new_coins)}."
+                        if tier == 'free':
+                            msg += (
+                                "\n\nUpgrade to Pro and every digest, alert, and analysis "
+                                "will be built around only these coins. /upgrade"
+                            )
+                        await send_telegram_message(session, chat_id, msg)
+                        continue
+
+                    if command == "/upgrade":
+                        user_tier = await asyncio.to_thread(database.get_user_tier, chat_id)
+                        if user_tier == 'pro':
+                            await send_telegram_message(session, chat_id, "🌟 You are already a <b>Pro</b> subscriber! Enjoy your premium market intelligence.")
+                        else:
+                            msg = (
+                                "🚀 <b>Upgrade to Pro</b>\n\n"
+                                "Unlock the full potential of Crypto Intel Bot:\n"
+                                "• <b>Personalized Intelligence:</b> Every digest & alert follows YOUR watchlist.\n"
+                                "• <b>Gemini Synthesized News:</b> Pro-level interpretation of every major headline.\n"
+                                "• <b>4H Dual Digest:</b> Exclusive market analysis twice a day.\n"
+                                "• <b>Priority Alerts:</b> Instant notifications for critical shifts.\n\n"
+                                "<b>Price:</b> ₹249/month\n\n"
+                                "<i>Use the payment link below to upgrade instantly. Your account will automatically switch to Pro upon successful payment.</i>\n\n"
+                                f"⚠️ <b>IMPORTANT:</b> Include your Telegram ID (<code>{chat_id}</code>) in the payment notes so we can automatically upgrade your account!\n\n"
+                                "👉 <a href='https://rzp.io/l/your_payment_link'>Click Here to Subscribe</a>"
+                            )
+                            await send_telegram_message(session, chat_id, msg)
+                        continue
+
+
+
                     if is_admin and command.startswith("/"):
                         await handle_admin_command(session, command, args, chat_id)
 
@@ -1861,15 +2049,26 @@ async def main():
         # Sync Telegram menu commands
         await register_admin_commands(session)
         
+        async def safe_loop(func, *args):
+            while True:
+                try:
+                    await func(*args)
+                    break
+                except Exception as e:
+                    print(f"🚨 Background loop {func.__name__} crashed: {e}. Restarting in 10s...")
+                    await asyncio.sleep(10)
+
         await asyncio.gather(
-            telegram_long_polling(session),
-            binance_liquidation_listener(session),
-            rsi_scanner_loop(session),
-            daily_digest_loop(session),
-            news_checker_loop(session),
-            macro_calendar_loop(session),
-            database_maintenance_loop(),
+            safe_loop(telegram_long_polling, session),
+            safe_loop(binance_liquidation_listener, session),
+            safe_loop(rsi_scanner_loop, session),
+            safe_loop(daily_digest_loop, session),
+            safe_loop(news_checker_loop, session),
+            safe_loop(macro_calendar_loop, session),
+            safe_loop(database_maintenance_loop),
+            safe_loop(run_webhook_server, session, TELEGRAM_API_URL),
         )
+
 
 
 if __name__ == "__main__":

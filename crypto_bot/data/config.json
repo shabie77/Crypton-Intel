@@ -1,0 +1,58 @@
+{
+  "tracked_coins": [
+    "BTC",
+    "ETH",
+    "SOL",
+    "XRP",
+    "ADA"
+  ],
+  "powell": {
+    "stance": "neutral",
+    "score": 3,
+    "note": "No manual Powell update yet.",
+    "updated_at": null
+  },
+  "etf": {
+    "summary": "No manual ETF update yet.",
+    "bias": "neutral",
+    "updated_at": null
+  },
+  "rsi": {
+    "overbought_threshold": 75,
+    "oversold_threshold": 25,
+    "volume_multiplier": 1.15,
+    "cooldown_hours": 6,
+    "intervals": {
+      "4h": {
+        "impact": "Moderate",
+        "icon": "\ud83d\udfe1"
+      },
+      "1d": {
+        "impact": "High",
+        "icon": "\ud83d\udfe0"
+      },
+      "1w": {
+        "impact": "Very High",
+        "icon": "\ud83d\udd34"
+      }
+    }
+  },
+  "digest": {
+    "hour_utc": 4,
+    "minute_utc": 0,
+    "symbols": [
+      "BTC",
+      "ETH",
+      "SOL"
+    ]
+  },
+  "volume_settings": {
+    "high": 120.0,
+    "normal": 85.0,
+    "low": 50.0
+  },
+  "liquidation_settings": {
+    "extreme": 500000000.0,
+    "high": 250000000.0
+  }
+}

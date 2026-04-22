@@ -475,7 +475,17 @@ def calculate_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 
+# Global Market Cache to reduce API overhead during broadcasts
+_MARKET_SNAPSHOT_CACHE = {}
+
 async def fetch_symbol_snapshot(session, symbol, config):
+    """Fetches full market metrics for a coin with a short-lived cache."""
+    now = datetime.now()
+    if symbol in _MARKET_SNAPSHOT_CACHE:
+        cached_val, timestamp = _MARKET_SNAPSHOT_CACHE[symbol]
+        # 30-second cache is enough to cover a broadcast burst
+        if (now - timestamp).total_seconds() < 30:
+            return cached_val
     pair = symbol_to_pair(symbol)
     url = "https://api.binance.com/api/v3/klines"
     params = {"symbol": pair, "interval": "1d", "limit": 50}
@@ -516,7 +526,7 @@ async def fetch_symbol_snapshot(session, symbol, config):
     else:
         volume_status = "VERY LOW 🔴"
 
-    return {
+    res = {
         "symbol": pair,
         "tag": pair_to_tag(pair),
         "price": current_price,
@@ -527,6 +537,8 @@ async def fetch_symbol_snapshot(session, symbol, config):
         "volume_delta": volume_delta,
         "volume_status": volume_status,
     }
+    _MARKET_SNAPSHOT_CACHE[symbol] = (res, datetime.now())
+    return res
 
 
 def calculate_market_pulse(snapshots, config):
@@ -697,8 +709,20 @@ async def call_groq_rest(session, prompt):
 
 
 
+# Global AI Cache to prevent burst rate limits
+_AI_SUMMARY_CACHE = {}
+
 async def get_ai_market_summary(session, snapshots, pulse):
-    """ Generates a professional AI market summary with Gemini -> Groq failover. """
+    """ Generates a professional AI market summary with Gemini -> Groq failover and caching. """
+    # Create a unique key based on the coins and their prices (rounded to prevent minor jitter)
+    cache_key = "|".join([f"{s['tag']}:{round(s['price'], 2)}" for s in snapshots if s])
+    
+    if cache_key in _AI_SUMMARY_CACHE:
+        # Check if cache is still fresh (within 10 minutes)
+        cached_val, timestamp = _AI_SUMMARY_CACHE[cache_key]
+        if (datetime.now() - timestamp).total_seconds() < 600:
+            return cached_val
+
     if not gemini_rotator.has_keys() and not groq_rotator.has_keys():
         return summarize_market_logic(snapshots, pulse)
         
@@ -729,7 +753,13 @@ async def get_ai_market_summary(session, snapshots, pulse):
             
     # Final Fallback: Manual
     print("🤖 All AI Layers failed. Falling back to manual logic.")
-    return summarize_market_logic(snapshots, pulse)
+    final_result = summarize_market_logic(snapshots, pulse)
+    
+    # Store in cache
+    if result or groq_result:
+        _AI_SUMMARY_CACHE[cache_key] = (result or groq_result, datetime.now())
+        
+    return result or groq_result or final_result
 
 
 async def build_digest_message(session, snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None, macro_partial_failure=False):

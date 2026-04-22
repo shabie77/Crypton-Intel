@@ -1239,6 +1239,7 @@ def build_help_message(is_admin):
         "/status — Bot health summary",
         "/channels — List active channels",
         "/listusers — Detailed user directory",
+        "/prolist — List Pro users only",
         "/setpro &lt;id&gt; — Manual Pro upgrade",
         "/setfree &lt;id&gt; — Manual Pro downgrade",
         "/send &lt;message&gt; — Broadcast message",
@@ -1542,7 +1543,9 @@ async def register_admin_commands(session):
         {"command": "users", "description": "List active DM users"},
         {"command": "test_digest", "description": "Test digest privately"},
         {"command": "setpro", "description": "Manual Pro upgrade"},
-        {"command": "setfree", "description": "Manual Pro downgrade"}
+        {"command": "setfree", "description": "Manual Pro downgrade"},
+        {"command": "prolist", "description": "List Pro users only"},
+        {"command": "listusers", "description": "Detailed user directory"}
     ]
 
     try:
@@ -1629,6 +1632,23 @@ async def handle_admin_command(session, command, args, chat_id):
             chunk = lines[i:i+20]
             header = f"👥 <b>User Directory</b> (Total: {total})\n\n" if i == 0 else ""
             await send_telegram_message(session, chat_id, header + "\n".join(chunk))
+        return
+
+    if command == "/prolist":
+        users = await asyncio.to_thread(database.get_all_users_with_tiers)
+        pro_users = [u for u in users if u[2] == "pro"]
+        if not pro_users:
+            await send_telegram_message(session, chat_id, "ℹ️ No Pro users found.")
+            return
+            
+        lines = []
+        for uid, uname, tier, expiry in pro_users:
+            label = f"@{uname}" if uname else uid
+            exp_date = expiry[:10] if expiry else "N/A"
+            lines.append(f"💎 {label} — ID: <code>{uid}</code> (Exp: {exp_date})")
+            
+        header = f"💎 <b>Pro User Directory</b> (Total: {len(pro_users)})\n\n"
+        await send_telegram_message(session, chat_id, header + "\n".join(lines))
         return
 
     if command == "/send":

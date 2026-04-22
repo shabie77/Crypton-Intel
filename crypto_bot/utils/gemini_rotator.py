@@ -2,12 +2,15 @@ import asyncio
 import os
 
 
-class GeminiRotator:
-    def __init__(self, keys=None):
-        self.keys = keys or os.getenv("GEMINI_KEYS", "").split(",")
-        self.keys = [k.strip() for k in self.keys if k.strip()]
-        if not self.keys and os.getenv("GEMINI_API_KEY"):
-            self.keys = [os.getenv("GEMINI_API_KEY")]
+class APIKeyRotator:
+    def __init__(self, env_var_multiple, env_var_single=None):
+        raw_keys = os.getenv(env_var_multiple, "")
+        self.keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+        
+        if not self.keys and env_var_single:
+            single = os.getenv(env_var_single)
+            if single:
+                self.keys = [single.strip()]
 
         self.current_index = 0
         self.lock = asyncio.Lock()
@@ -18,7 +21,6 @@ class GeminiRotator:
                 return None, None
             index = self.current_index % len(self.keys)
             key = self.keys[index]
-            # Advance immediately so concurrent callers spread across keys.
             self.current_index = (index + 1) % len(self.keys)
             return index, key
 
@@ -26,12 +28,27 @@ class GeminiRotator:
         async with self.lock:
             if not self.keys:
                 return
-            # Force advance if a key hit 429, ensuring we move past it in the sequence.
+            # Force advance to next key
             self.current_index = (self.current_index + 1) % len(self.keys)
-            print(f"Gemini key rotated due to 429. Next global start index: {self.current_index}")
 
     def has_keys(self):
         return len(self.keys) > 0
 
     def get_all_keys(self):
         return self.keys
+
+
+class GeminiRotator(APIKeyRotator):
+    def __init__(self, keys_str=None):
+        # Allow passing keys directly for testing, otherwise use env vars
+        if keys_str:
+            self.keys = [k.strip() for k in keys_str.split(",") if k.strip()]
+            self.current_index = 0
+            self.lock = asyncio.Lock()
+        else:
+            super().__init__("GEMINI_KEYS", "GEMINI_API_KEY")
+
+
+class GroqRotator(APIKeyRotator):
+    def __init__(self):
+        super().__init__("GROQ_KEYS", "GROQ_API_KEY")

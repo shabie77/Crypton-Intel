@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 import xml.etree.ElementTree as ET
 
 import database
-from utils.gemini_rotator import GeminiRotator
+from utils.gemini_rotator import GeminiRotator, GroqRotator
 from webhook_server import run_webhook_server
 
 
@@ -39,11 +39,13 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Gemini/Groq AI status
 gemini_rotator = GeminiRotator()
+groq_rotator = GroqRotator()
+
 if gemini_rotator.has_keys():
     print(f"🤖 Gemini AI Intelligence Layer initialized ({len(gemini_rotator.get_all_keys())} keys).")
-if GROQ_API_KEY:
-    print(f"🧠 Groq AI Failover Layer initialized (Backup).")
-if not gemini_rotator.has_keys() and not GROQ_API_KEY:
+if groq_rotator.has_keys():
+    print(f"🧠 Groq AI Failover Layer initialized ({len(groq_rotator.get_all_keys())} keys).")
+if not gemini_rotator.has_keys() and not groq_rotator.has_keys():
     print("⚠️ AI API Keys missing. Bot will use manual market summary logic.")
 
 RSI_STATE_FILE = os.getenv("RSI_STATE_FILE", os.path.join(DATA_DIR, "rsi_state.json"))
@@ -656,84 +658,77 @@ async def call_gemini_rest(session, prompt):
 
 
 async def call_groq_rest(session, prompt):
-    """Calls Groq REST API (High-speed Backup) via aiohttp."""
-    if not GROQ_API_KEY:
+    """Calls Groq REST API (High-speed Backup) via aiohttp with rotation."""
+    if not groq_rotator.has_keys():
         return None
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
-        "max_tokens": 512
-    }
-    try:
-        async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                if text:
-                    print(f"🧠 Groq AI success (Llama 3.3).")
-                    return text.strip()
-            else:
-                body = await resp.text()
-                print(f"❌ Groq API error ({resp.status}): {body[:100]}")
-    except Exception as e:
-        print(f"❌ Groq REST call failed: {e}")
+
+    # Try all keys
+    for _ in range(len(groq_rotator.get_all_keys())):
+        reserved_index, key = await groq_rotator.reserve_key()
+        if not key:
+            continue
+
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        payload = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+            "max_tokens": 512
+        }
+        try:
+            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    if text:
+                        print(f"✅ Groq AI success (Llama 3.3).")
+                        return text.strip()
+                elif resp.status == 429:
+                    print(f"⚠️ Groq Key 429 (Rate Limit). Rotating...")
+                    await groq_rotator.advance_after_rate_limit(reserved_index)
+                    continue
+                else:
+                    body = await resp.text()
+                    print(f"❌ Groq API error ({resp.status}): {body[:100]}")
+        except Exception as e:
+            print(f"❌ Groq REST call failed: {e}")
     return None
+
 
 
 async def get_ai_market_summary(session, snapshots, pulse):
     """ Generates a professional AI market summary with Gemini -> Groq failover. """
-    if not gemini_rotator.has_keys() and not GROQ_API_KEY:
-        missing_msg = (
-            f"⚠️ <b>AI ENGINE OFFLINE</b>\n\n"
-            f"Both `GEMINI_API_KEY` and `GROQ_API_KEY` are missing on Railway.\n"
-            f"<i>The daily digest is falling back to manual logic.</i>"
-        )
-        asyncio.create_task(send_telegram_message(session, ADMIN_USER_ID, missing_msg))
+    if not gemini_rotator.has_keys() and not groq_rotator.has_keys():
         return summarize_market_logic(snapshots, pulse)
         
-    try:
-        coin_info = []
-        for s in snapshots:
-            if s:
-                coin_info.append(f"#{s['tag']}: ${s['price']:,.2f} ({s['change_24h']:+.2f}% 24h, Trend: {s['trend']}, RSI: {s['rsi']:.1f})")
+    coin_info = []
+    for s in snapshots:
+        if s:
+            coin_info.append(f"#{s['tag']}: ${s['price']:,.2f} ({s['change_24h']:+.2f}% 24h, Trend: {s['trend']}, RSI: {s['rsi']:.1f})")
+    
+    context = "\n".join(coin_info)
+    prompt = (
+        f"Act as a professional Crypto Market Analyst. Summarize the following 24h market data into 2-3 precise, "
+        f"insightful sentences for a high-level trading digest. Focus on trend confluence and momentum.\n\n"
+        f"Market Pulse Score: {pulse['score']}/100 ({pulse['label']})\n"
+        f"24h Snapshots:\n{context}\n\n"
+        f"Output only the summary text."
+    )
+    
+    # Attempt 1: Gemini (with rotation)
+    result = await call_gemini_rest(session, prompt)
+    if result:
+        return result
         
-        context = "\n".join(coin_info)
-        prompt = (
-            f"Act as a professional Crypto Market Analyst. Summarize the following 24h market data into 2-3 precise, "
-            f"insightful sentences for a high-level trading digest. Focus on trend confluence and momentum.\n\n"
-            f"Market Pulse Score: {pulse['score']}/100 ({pulse['label']})\n"
-            f"24h Snapshots:\n{context}\n\n"
-            f"Output only the summary text."
-        )
-        
-        # Primary: Gemini
-        try:
-            result = await call_gemini_rest(session, prompt)
-            if result:
-                return result
-        except Exception as e:
-            # If Gemini QUOTA EXCEEDED (429), Jump instantly to Groq
-            if "Quota Exceeded" in str(e) or "429" in str(e):
-                print("🔄 Gemini Quota reached. Switching to Groq Backup Brain...")
-                groq_result = await call_groq_rest(session, prompt)
-                if groq_result:
-                    return groq_result
+    # Attempt 2: Groq (Failover)
+    print("🔄 Gemini failed/exhausted. Switching to Groq Backup Brain...")
+    groq_result = await call_groq_rest(session, prompt)
+    if groq_result:
+        return groq_result
             
-            # For other errors, still alert but fallback to manual
-            print(f"🤖 Gemini AI Synthesis failed: {e}. Falling back to manual logic.")
-            alert_msg = (
-                f"⚠️ <b>GEMINI AI FAILURE</b>\n\n"
-                f"<b>Error Detail:</b> {html_safe(str(e))}\n\n"
-                f"<i>The daily digest is falling back to manual logic.</i>"
-            )
-            asyncio.create_task(send_telegram_message(session, ADMIN_USER_ID, alert_msg))
-            
-    except Exception as total_exc:
-        print(f"❌ TOTAL AI LAYER FAILURE: {total_exc}")
-        
+    # Final Fallback: Manual
+    print("🤖 All AI Layers failed. Falling back to manual logic.")
     return summarize_market_logic(snapshots, pulse)
 
 

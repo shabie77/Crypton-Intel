@@ -2,6 +2,7 @@ import asyncio
 import html
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
@@ -1189,15 +1190,17 @@ def build_help_message(is_admin):
         "<b>Admin Commands</b>",
         "/status — Bot health summary",
         "/channels — List active channels",
-        "/users — List active DM users",
-        "/send &lt;message&gt; — Broadcast message",
+        "/listusers — Detailed user directory",
+        "/setpro <id> — Manual Pro upgrade",
+        "/setfree <id> — Manual Pro downgrade",
+        "/send <message> — Broadcast message",
         "/digest — Broadcast digest now",
         "/test_digest — Private test digest",
-        "/update_powell &lt;stance&gt; &lt;score&gt; &lt;note&gt;",
-        "/update_etf &lt;summary&gt;",
-        "/update_coins &lt;add/remove&gt; &lt;symbol&gt;",
-        "/revoke &lt;name/id&gt;",
-        "/renew &lt;name/id&gt;",
+        "/update_powell <stance> <score> <note>",
+        "/update_etf <summary>",
+        "/update_coins <add/remove> <symbol>",
+        "/revoke <name/id>",
+        "/renew <name/id>",
     ]
     return "\n".join(common_lines + [""] + admin_lines)
 
@@ -1525,10 +1528,10 @@ async def handle_admin_command(session, command, args, chat_id):
         return
 
     if command == "/setpro":
-        if not args or not args.isdigit():
-            await send_telegram_message(session, chat_id, "❌ Usage: /setpro <user_id>")
+        target_user = args.strip() if args else ""
+        if not target_user or not re.match(r'^-?\d+$', target_user):
+            await send_telegram_message(session, chat_id, "❌ Usage: /setpro <id>")
             return
-        target_user = args.strip()
         await asyncio.to_thread(database.set_user_tier, chat_id, target_user, "pro")
         await send_telegram_message(session, chat_id, f"✅ User {target_user} upgraded to Pro.")
         # Notify user
@@ -1543,10 +1546,10 @@ async def handle_admin_command(session, command, args, chat_id):
         return
 
     if command == "/setfree":
-        if not args or not args.isdigit():
-            await send_telegram_message(session, chat_id, "❌ Usage: /setfree <user_id>")
+        target_user = args.strip() if args else ""
+        if not target_user or not re.match(r'^-?\d+$', target_user):
+            await send_telegram_message(session, chat_id, "❌ Usage: /setfree <id>")
             return
-        target_user = args.strip()
         await asyncio.to_thread(database.set_user_tier, chat_id, target_user, "free")
         await send_telegram_message(session, chat_id, f"⚠️ User {target_user} moved to Free tier.")
         # Notify user

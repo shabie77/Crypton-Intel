@@ -5,7 +5,10 @@ DB_FILE = os.getenv("DB_FILE", "subscribers.db")
 
 
 def _connect():
-    return sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
 
 def init_db():
     print("🛠️ Initializing SQLite Database...")
@@ -47,6 +50,9 @@ def init_db():
             timestamp TEXT
         )
     ''')
+    # Fix 2 Step A: Add indexes for performance
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_liq_timestamp ON liquidations(timestamp);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts_log(timestamp);")
     cursor.execute('''
         INSERT OR IGNORE INTO channels (channel_id, channel_name, status) 
         VALUES ('1120431469', 'Pes_Store (Admin)', 'ACTIVE')
@@ -66,7 +72,16 @@ def add_channel(channel_id, channel_name):
     existing_channel = cursor.fetchone()
     
     if existing_channel:
-        print(f"🔒 Banned channel {channel_name} tried to re-add the bot. Access Denied.")
+        # Fix 6: Check status before deciding it's a banned attempt
+        status = existing_channel[0]
+        if status == 'BANNED' or status == 'EXPIRED':
+            print(f"🔒 Banned channel {channel_name} tried to re-add the bot. Access Denied.")
+            conn.close()
+            return False
+        else:
+            # Channel already active or in a non-banned state — skip silently
+            conn.close()
+            return True
     else:
         cursor.execute('''
             INSERT INTO channels (channel_id, channel_name, status) 
@@ -75,6 +90,7 @@ def add_channel(channel_id, channel_name):
         print(f"🎉 New Channel Registered: {channel_name} ({channel_id})")
     conn.commit()
     conn.close()
+    return True
 
 def add_user(user_id, username, full_name):
     conn = _connect()
@@ -228,3 +244,23 @@ def get_24h_liquidation_stats(iso_cutoff):
     if row and row[0]:
         return {"total": row[0], "longs": row[1], "shorts": row[2]}
     return {"total": 0.0, "longs": 0.0, "shorts": 0.0}
+
+# Fix 2 Step B: Add cleanup function
+async def cleanup_old_data():
+    """ Deletes rows older than 7 days from liquidations and alerts_log. """
+    import asyncio
+    
+    def _run_delete():
+        conn = _connect()
+        try:
+            conn.execute("DELETE FROM liquidations WHERE timestamp < datetime('now', '-7 days')")
+            conn.execute("DELETE FROM alerts_log WHERE timestamp < datetime('now', '-7 days')")
+            conn.commit()
+            print("🧹 Database cleanup complete: Old records purged.")
+        except Exception as e:
+            print(f"❌ Database cleanup failed: {e}")
+        finally:
+            conn.close()
+
+    # Run in thread to avoid blocking the async loop
+    await asyncio.to_thread(_run_delete)

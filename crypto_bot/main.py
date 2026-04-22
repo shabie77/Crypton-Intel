@@ -8,6 +8,8 @@ from email.utils import parsedate_to_datetime
 import aiohttp
 import websockets
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
 
 import database
 
@@ -116,7 +118,7 @@ def utc_to_ist(utc_time_str):
         h_display = h if 0 < h <= 12 else (h - 12 if h > 12 else 12)
         if h_display == 0: h_display = 12
         return f"{h_display:02d}:{m:02d} {period} IST"
-    except:
+    except Exception:
         return utc_time_str
 
 
@@ -710,7 +712,7 @@ async def build_digest_message(session, snapshots, pulse, config, top_news=None,
             last_ts = datetime.fromisoformat(last_updated_str).timestamp()
             if (utc_now().timestamp() - last_ts) < 86400: # 24 hours
                 show_powell = True
-        except:
+        except Exception:
             pass
             
     if show_powell:
@@ -793,7 +795,6 @@ async def fetch_top_news(session):
                 return []
             xml_data = await response.text()
             
-            import xml.etree.ElementTree as ET
             root = ET.fromstring(xml_data)
             channel = root.find('channel')
             if channel is None:
@@ -811,7 +812,7 @@ async def fetch_top_news(session):
                 try:
                     dt = parsedate_to_datetime(pubDate.text)
                     published_on = dt.timestamp()
-                except:
+                except Exception:
                     continue
                     
                 if published_on < cutoff:
@@ -857,8 +858,7 @@ async def _fetch_investing_macro_events(session, timeframe_tab):
     Bypasses the broken ForexFactory Next Week feed.
     """
     try:
-        from bs4 import BeautifulSoup
-        import json
+        pass
     except ImportError:
         print("   - ❌ Error: BeautifulSoup4 not installed. Cannot fetch Investing.com data.")
         return False, []
@@ -966,7 +966,6 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
     ]
 
 
-    import xml.etree.ElementTree as ET
     
     total_successful_feeds = 0
     total_attempted_feeds = len(feed_targets)
@@ -1014,7 +1013,7 @@ async def _fetch_all_high_impact_events(session, horizon_days=1):
                         try:
                             event_dt = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p").replace(tzinfo=timezone.utc)
                             event_ts = event_dt.timestamp()
-                        except:
+                        except Exception:
                             continue # Skip malformed dates
                         
                         unique_id = f"{title_node.text.strip()}_{event_ts}"
@@ -1741,6 +1740,18 @@ async def macro_calendar_loop(session):
 
         await asyncio.sleep(300)  # Check every 5 minutes for precise 2-hour alerts
 
+async def database_maintenance_loop():
+    """ Runs database cleanup once on startup and then every 7 days. """
+    print("🧹 Database Maintenance Engine is Live...")
+    while True:
+        try:
+            await database.cleanup_old_data()
+        except Exception as exc:
+            print(f"Database Maintenance Error: {exc}")
+        
+        # Wait for 7 days (604800 seconds)
+        await asyncio.sleep(604800)
+
 
 async def telegram_long_polling(session):
     offset = None
@@ -1857,6 +1868,7 @@ async def main():
             daily_digest_loop(session),
             news_checker_loop(session),
             macro_calendar_loop(session),
+            database_maintenance_loop(),
         )
 
 

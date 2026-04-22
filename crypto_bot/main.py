@@ -476,69 +476,75 @@ def calculate_rsi(prices, period=14):
 
 
 # Global Market Cache to reduce API overhead during broadcasts
-_MARKET_SNAPSHOT_CACHE = {}
+# Global Caches & Locks
+_AI_SUMMARY_CACHE = {}      # {(snapshots_key, pulse_score): (summary, timestamp)}
+_MARKET_SNAPSHOT_CACHE = {} # {symbol: (snapshot, timestamp)}
+
+_AI_CACHE_LOCK = asyncio.Lock()
+_MARKET_CACHE_LOCK = asyncio.Lock()
+
 
 async def fetch_symbol_snapshot(session, symbol, config):
     """Fetches full market metrics for a coin with a short-lived cache."""
     now = datetime.now()
-    if symbol in _MARKET_SNAPSHOT_CACHE:
-        cached_val, timestamp = _MARKET_SNAPSHOT_CACHE[symbol]
-        # 30-second cache is enough to cover a broadcast burst
-        if (now - timestamp).total_seconds() < 30:
-            return cached_val
-    pair = symbol_to_pair(symbol)
-    url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": pair, "interval": "1d", "limit": 50}
-    candles = await fetch_with_backoff(session, url, params)
-    if not candles:
-        return None
+    async with _MARKET_CACHE_LOCK:
+        if symbol in _MARKET_SNAPSHOT_CACHE:
+            cached_val, timestamp = _MARKET_SNAPSHOT_CACHE[symbol]
+            # 30-second cache is enough to cover a broadcast burst
+            if (now - timestamp).total_seconds() < 30:
+                return cached_val
+        
+        pair = symbol_to_pair(symbol)
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": pair, "interval": "1d", "limit": 50}
+        candles = await fetch_with_backoff(session, url, params)
+        if not candles:
+            return None
 
-    close_prices = [float(candle[4]) for candle in candles]
-    volumes = [float(candle[5]) for candle in candles]
-    current_price = close_prices[-1]
-    previous_price = close_prices[-2] if len(close_prices) > 1 else current_price
-    sma_50 = sum(close_prices) / len(close_prices)
-    rsi = calculate_rsi(close_prices)
-    
-    # Yesterday's Completed Volume vs 20-day Moving Average (last 20 days)
-    # Binary: volumes[-1] is UNFINISHED TODAY. volumes[-2] is COMPLETED YESTERDAY.
-    current_volume = volumes[-2] 
-    ma_period = 20
-    recent_volumes = volumes[-ma_period-1:-1] # The 20 bars BEFORE today
-    average_volume = sum(recent_volumes) / max(len(recent_volumes), 1)
-    
-    # Calculate: (Yesterday's volume / 20-day MA) * 100
-    volume_ratio = current_volume / average_volume if average_volume else 1.0
-    volume_percent = volume_ratio * 100
-    volume_delta = (volume_ratio - 1) * 100
-    
-    change_24h = ((current_price - previous_price) / previous_price * 100) if previous_price else 0.0
-    trend = "BULLISH 🟢" if current_price > sma_50 else "BEARISH 🔴"
-    
-    # Load thresholds from config
-    vol_cfg = config.get("volume_settings", DEFAULT_CONFIG["volume_settings"])
-    if volume_percent >= vol_cfg["high"]:
-        volume_status = "HIGH 🟢"
-    elif volume_percent >= vol_cfg["normal"]:
-        volume_status = "NORMAL ⚪"
-    elif volume_percent >= vol_cfg["low"]:
-        volume_status = "LOW 🔴"
-    else:
-        volume_status = "VERY LOW 🔴"
+        close_prices = [float(candle[4]) for candle in candles]
+        volumes = [float(candle[5]) for candle in candles]
+        current_price = close_prices[-1]
+        previous_price = close_prices[-2] if len(close_prices) > 1 else current_price
+        sma_50 = sum(close_prices) / len(close_prices)
+        rsi = calculate_rsi(close_prices)
+        
+        # Yesterday's Completed Volume vs 20-day Moving Average (last 20 days)
+        current_volume = volumes[-2] 
+        ma_period = 20
+        recent_volumes = volumes[-ma_period-1:-1]
+        average_volume = sum(recent_volumes) / max(len(recent_volumes), 1)
+        
+        volume_ratio = current_volume / average_volume if average_volume else 1.0
+        volume_percent = volume_ratio * 100
+        volume_delta = (volume_ratio - 1) * 100
+        
+        change_24h = ((current_price - previous_price) / previous_price * 100) if previous_price else 0.0
+        trend = "BULLISH 🟢" if current_price > sma_50 else "BEARISH 🔴"
+        
+        vol_cfg = config.get("volume_settings", DEFAULT_CONFIG["volume_settings"])
+        if volume_percent >= vol_cfg["high"]: volume_status = "HIGH 🟢"
+        elif volume_percent >= vol_cfg["normal"]: volume_status = "NORMAL ⚪"
+        elif volume_percent >= vol_cfg["low"]: volume_status = "LOW 🔴"
+        else: volume_status = "VERY LOW 🔴"
 
-    res = {
-        "symbol": pair,
-        "tag": pair_to_tag(pair),
-        "price": current_price,
-        "change_24h": change_24h,
-        "trend": trend,
-        "rsi": rsi,
-        "volume_percent": volume_percent,
-        "volume_delta": volume_delta,
-        "volume_status": volume_status,
-    }
-    _MARKET_SNAPSHOT_CACHE[symbol] = (res, datetime.now())
-    return res
+        res = {
+            "symbol": pair,
+            "tag": pair_to_tag(pair),
+            "price": current_price,
+            "change_24h": change_24h,
+            "trend": trend,
+            "rsi": rsi,
+            "volume_percent": volume_percent,
+            "volume_delta": volume_delta,
+            "volume_status": volume_status,
+        }
+        # FIFO Cache Purge
+        if len(_MARKET_SNAPSHOT_CACHE) >= 100:
+            oldest_key = next(iter(_MARKET_SNAPSHOT_CACHE))
+            _MARKET_SNAPSHOT_CACHE.pop(oldest_key)
+            
+        _MARKET_SNAPSHOT_CACHE[symbol] = (res, datetime.now())
+        return res
 
 
 def calculate_market_pulse(snapshots, config):
@@ -654,7 +660,7 @@ async def call_gemini_rest(session, prompt):
                         # Model not supported by this key or region, try next model
                         continue
                     elif resp.status == 429:
-                        print(f"⚠️ Gemini Key 429 (Rate Limit). Rotating...")
+                        print(f"ℹ️ Gemini Key 429 (Rate Limit). Rotating...")
                         await gemini_rotator.advance_after_rate_limit(reserved_index)
                         break # Try the next key
                     else:
@@ -709,57 +715,68 @@ async def call_groq_rest(session, prompt):
 
 
 
-# Global AI Cache to prevent burst rate limits
-_AI_SUMMARY_CACHE = {}
 
 async def get_ai_market_summary(session, snapshots, pulse):
     """ Generates a professional AI market summary with Gemini -> Groq failover and caching. """
     # Create a unique key based on the coins and their prices (rounded to prevent minor jitter)
     cache_key = "|".join([f"{s['tag']}:{round(s['price'], 2)}" for s in snapshots if s])
     
-    if cache_key in _AI_SUMMARY_CACHE:
-        # Check if cache is still fresh (within 10 minutes)
-        cached_val, timestamp = _AI_SUMMARY_CACHE[cache_key]
-        if (datetime.now() - timestamp).total_seconds() < 600:
-            return cached_val
-
-    if not gemini_rotator.has_keys() and not groq_rotator.has_keys():
-        return summarize_market_logic(snapshots, pulse)
+    async with _AI_CACHE_LOCK:
+        if cache_key in _AI_SUMMARY_CACHE:
+            # Check if cache is still fresh (within 10 minutes)
+            cached_val, timestamp = _AI_SUMMARY_CACHE[cache_key]
+            if (datetime.now() - timestamp).total_seconds() < 600:
+                return cached_val
         
-    coin_info = []
-    for s in snapshots:
-        if s:
-            coin_info.append(f"#{s['tag']}: ${s['price']:,.2f} ({s['change_24h']:+.2f}% 24h, Trend: {s['trend']}, RSI: {s['rsi']:.1f})")
-    
-    context = "\n".join(coin_info)
-    prompt = (
-        f"Act as a professional Crypto Market Analyst. Summarize the following 24h market data into 2-3 precise, "
-        f"insightful sentences for a high-level trading digest. Focus on trend confluence and momentum.\n\n"
-        f"Market Pulse Score: {pulse['score']}/100 ({pulse['label']})\n"
-        f"24h Snapshots:\n{context}\n\n"
-        f"Output only the summary text."
-    )
-    
-    # Attempt 1: Gemini (with rotation)
-    result = await call_gemini_rest(session, prompt)
-    if result:
-        return result
-        
-    # Attempt 2: Groq (Failover)
-    print("🔄 Gemini failed/exhausted. Switching to Groq Backup Brain...")
-    groq_result = await call_groq_rest(session, prompt)
-    if groq_result:
-        return groq_result
+        if not gemini_rotator.has_keys() and not groq_rotator.has_keys():
+            return summarize_market_logic(snapshots, pulse)
             
-    # Final Fallback: Manual
-    print("🤖 All AI Layers failed. Falling back to manual logic.")
-    final_result = summarize_market_logic(snapshots, pulse)
-    
-    # Store in cache
-    if result or groq_result:
-        _AI_SUMMARY_CACHE[cache_key] = (result or groq_result, datetime.now())
+        coin_info = []
+        for s in snapshots:
+            if s:
+                coin_info.append(f"#{s['tag']}: ${s['price']:,.2f} ({s['change_24h']:+.2f}% 24h, Trend: {s['trend']}, RSI: {s['rsi']:.1f})")
         
-    return result or groq_result or final_result
+        context = "\n".join(coin_info)
+        prompt = (
+            f"Act as a professional Crypto Market Analyst. Summarize the following 24h market data into 2-3 precise, "
+            f"insightful sentences for a high-level trading digest. Focus on trend confluence and momentum.\n\n"
+            f"Market Pulse Score: {pulse['score']}/100 ({pulse['label']})\n"
+            f"24h Snapshots:\n{context}\n\n"
+            f"Output only the summary text."
+        )
+        
+        # Attempt 1: Gemini (with rotation)
+        result = await call_gemini_rest(session, prompt)
+        if result:
+            # FIFO Cache Purge
+            if len(_AI_SUMMARY_CACHE) >= 100:
+                oldest_key = next(iter(_AI_SUMMARY_CACHE))
+                _AI_SUMMARY_CACHE.pop(oldest_key)
+            _AI_SUMMARY_CACHE[cache_key] = (result, datetime.now())
+            return result
+            
+        # Attempt 2: Groq (Failover)
+        print("🔄 Gemini failed/exhausted. Switching to Groq Backup Brain...")
+        groq_result = await call_groq_rest(session, prompt)
+        if groq_result:
+            # FIFO Cache Purge
+            if len(_AI_SUMMARY_CACHE) >= 100:
+                oldest_key = next(iter(_AI_SUMMARY_CACHE))
+                _AI_SUMMARY_CACHE.pop(oldest_key)
+            _AI_SUMMARY_CACHE[cache_key] = (groq_result, datetime.now())
+            return groq_result
+                
+        # Final Fallback: Manual
+        print("🤖 All AI Layers failed. Falling back to manual logic.")
+        final_result = summarize_market_logic(snapshots, pulse)
+        
+        # Cache manual fallback too
+        if len(_AI_SUMMARY_CACHE) >= 100:
+            oldest_key = next(iter(_AI_SUMMARY_CACHE))
+            _AI_SUMMARY_CACHE.pop(oldest_key)
+        _AI_SUMMARY_CACHE[cache_key] = (final_result, datetime.now())
+        
+        return final_result
 
 
 async def build_digest_message(session, snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None, macro_partial_failure=False):
@@ -1222,16 +1239,16 @@ def build_help_message(is_admin):
         "/status — Bot health summary",
         "/channels — List active channels",
         "/listusers — Detailed user directory",
-        "/setpro <id> — Manual Pro upgrade",
-        "/setfree <id> — Manual Pro downgrade",
-        "/send <message> — Broadcast message",
+        "/setpro &lt;id&gt; — Manual Pro upgrade",
+        "/setfree &lt;id&gt; — Manual Pro downgrade",
+        "/send &lt;message&gt; — Broadcast message",
         "/digest — Broadcast digest now",
         "/test_digest — Private test digest",
-        "/update_powell <stance> <score> <note>",
-        "/update_etf <summary>",
-        "/update_coins <add/remove> <symbol>",
-        "/revoke <name/id>",
-        "/renew <name/id>",
+        "/update_powell &lt;stance&gt; &lt;score&gt; &lt;note&gt;",
+        "/update_etf &lt;summary&gt;",
+        "/update_coins &lt;add/remove&gt; &lt;symbol&gt;",
+        "/revoke &lt;name/id&gt;",
+        "/renew &lt;name/id&gt;",
     ]
     return "\n".join(common_lines + [""] + admin_lines)
 
@@ -1523,7 +1540,9 @@ async def register_admin_commands(session):
         {"command": "macro", "description": "Audit upcoming macro events"},
         {"command": "channels", "description": "List active channels"},
         {"command": "users", "description": "List active DM users"},
-        {"command": "test_digest", "description": "Test digest privately"}
+        {"command": "test_digest", "description": "Test digest privately"},
+        {"command": "setpro", "description": "Manual Pro upgrade"},
+        {"command": "setfree", "description": "Manual Pro downgrade"}
     ]
 
     try:
@@ -1561,7 +1580,7 @@ async def handle_admin_command(session, command, args, chat_id):
     if command == "/setpro":
         target_user = args.strip() if args else ""
         if not target_user or not re.match(r'^-?\d+$', target_user):
-            await send_telegram_message(session, chat_id, "❌ Usage: /setpro <id>")
+            await send_telegram_message(session, chat_id, "ℹ️ Usage: /setpro &lt;id&gt;")
             return
         await asyncio.to_thread(database.set_user_tier, chat_id, target_user, "pro")
         await send_telegram_message(session, chat_id, f"✅ User {target_user} upgraded to Pro.")
@@ -1579,7 +1598,7 @@ async def handle_admin_command(session, command, args, chat_id):
     if command == "/setfree":
         target_user = args.strip() if args else ""
         if not target_user or not re.match(r'^-?\d+$', target_user):
-            await send_telegram_message(session, chat_id, "❌ Usage: /setfree <id>")
+            await send_telegram_message(session, chat_id, "ℹ️ Usage: /setfree &lt;id&gt;")
             return
         await asyncio.to_thread(database.set_user_tier, chat_id, target_user, "free")
         await send_telegram_message(session, chat_id, f"⚠️ User {target_user} moved to Free tier.")
@@ -1614,7 +1633,7 @@ async def handle_admin_command(session, command, args, chat_id):
 
     if command == "/send":
         if not args:
-            await send_telegram_message(session, chat_id, "Usage: /send <message>")
+            await send_telegram_message(session, chat_id, "Usage: /send &lt;message&gt;")
             return
         message = f"<b>📢 ADMIN BROADCAST</b>\n\n{html_safe(args)}"
         sent = await broadcast_message(session, message)
@@ -1661,7 +1680,7 @@ async def handle_admin_command(session, command, args, chat_id):
     if command == "/update_powell":
         parts = args.split(" ", 2)
         if len(parts) < 3:
-            await send_telegram_message(session, chat_id, "Usage: /update_powell <stance> <score> <note>")
+            await send_telegram_message(session, chat_id, "Usage: /update_powell &lt;stance&gt; &lt;score&gt; &lt;note&gt;")
             return
         stance, score_text, note = parts
         try:
@@ -1688,7 +1707,7 @@ async def handle_admin_command(session, command, args, chat_id):
 
     if command == "/update_etf":
         if not args:
-            await send_telegram_message(session, chat_id, "Usage: /update_etf <summary>")
+            await send_telegram_message(session, chat_id, "Usage: /update_etf &lt;summary&gt;")
             return
         bias = classify_bias(args)
         await update_config(
@@ -1709,7 +1728,7 @@ async def handle_admin_command(session, command, args, chat_id):
     if command == "/update_coins":
         parts = args.split()
         if len(parts) != 2:
-            await send_telegram_message(session, chat_id, "Usage: /update_coins <add/remove> <symbol>")
+            await send_telegram_message(session, chat_id, "Usage: /update_coins &lt;add/remove&gt; &lt;symbol&gt;")
             return
         action, symbol = parts[0].lower(), parts[1].upper()
         if action not in {"add", "remove"}:
@@ -1762,7 +1781,7 @@ async def handle_admin_command(session, command, args, chat_id):
     if command == "/revoke":
         target_customer = args.strip()
         if not target_customer:
-            await send_telegram_message(session, chat_id, "Usage: /revoke <channel name or id>")
+            await send_telegram_message(session, chat_id, "Usage: /revoke &lt;channel name or id&gt;")
             return
         actual_id = database.get_channel_id_by_name(target_customer)
         success = database.ban_channel(target_customer)
@@ -1778,7 +1797,7 @@ async def handle_admin_command(session, command, args, chat_id):
     if command == "/renew":
         target_customer = args.strip()
         if not target_customer:
-            await send_telegram_message(session, chat_id, "Usage: /renew <channel name or id>")
+            await send_telegram_message(session, chat_id, "Usage: /renew &lt;channel name or id&gt;")
             return
         success = database.renew_channel(target_customer)
         if success:
@@ -1889,7 +1908,7 @@ async def macro_calendar_loop(session):
                     alert = (
                         f"🏛️ <b>MACRO VOLATILITY WARNING</b>\n\n"
                         f"<b>Event:</b> {html_safe(event['title'])}\n"
-                        f"<b>Country:</b> {event['country']}\n"
+                        f"<b>Country:</b> {html_safe(event['country'])}\n"
                         f"<b>Time:</b> {ist_time}\n\n"
                         f"<b>Why it matters:</b> This is a High Impact event. Expect significant volatility in BTC and ETH pairs around this time.\n"
                         f"<b>Watch next:</b> Ensure your trade positions are secured before the data drops."
@@ -1991,7 +2010,7 @@ async def telegram_long_polling(session):
 
                     if command == "/feedback":
                         if not args:
-                            await send_telegram_message(session, chat_id, "Usage: /feedback <your suggestion>")
+                            await send_telegram_message(session, chat_id, "Usage: /feedback &lt;your suggestion&gt;")
                             continue
                         
                         user_info = message.get("from", {})

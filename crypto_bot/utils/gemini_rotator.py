@@ -14,22 +14,42 @@ class APIKeyRotator:
 
         self.current_index = 0
         self.lock = asyncio.Lock()
+        # Track cooldown for each key: {index: timestamp}
+        self.cooldowns = {}
 
     async def reserve_key(self):
+        import time
         async with self.lock:
             if not self.keys:
                 return None, None
-            index = self.current_index % len(self.keys)
-            key = self.keys[index]
-            self.current_index = (index + 1) % len(self.keys)
-            return index, key
+            
+            num_keys = len(self.keys)
+            # Try to find a key that is not on cooldown
+            for _ in range(num_keys):
+                index = self.current_index % num_keys
+                key = self.keys[index]
+                self.current_index = (self.current_index + 1) % num_keys
+                
+                # Check cooldown (60 seconds)
+                last_429 = self.cooldowns.get(index, 0)
+                if time.time() - last_429 > 60:
+                    return index, key
+            
+            # If all keys are on cooldown, return the least-recently used one anyway
+            index = self.current_index % num_keys
+            return index, self.keys[index]
 
     async def advance_after_rate_limit(self, reserved_index):
+        import time
         async with self.lock:
             if not self.keys:
                 return
-            # Force advance to next key
-            self.current_index = (self.current_index + 1) % len(self.keys)
+            # Mark this key as cooled down
+            self.cooldowns[reserved_index] = time.time()
+            
+            # If we were already pointing at this key, move to next
+            if self.current_index % len(self.keys) == reserved_index:
+                self.current_index = (reserved_index + 1) % len(self.keys)
 
     def has_keys(self):
         return len(self.keys) > 0
@@ -45,6 +65,7 @@ class GeminiRotator(APIKeyRotator):
             self.keys = [k.strip() for k in keys_str.split(",") if k.strip()]
             self.current_index = 0
             self.lock = asyncio.Lock()
+            self.cooldowns = {}
         else:
             super().__init__("GEMINI_KEYS", "GEMINI_API_KEY")
 

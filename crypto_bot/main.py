@@ -287,30 +287,36 @@ async def send_telegram_message(session, chat_id, text):
 
 async def broadcast_message(session, text, include_channels=True, include_users=True):
     sent = 0
+    sent_ids = set()
     
     # 1. Channels (Always receive everything)
     if include_channels:
         channels = await asyncio.to_thread(database.get_active_channels)
         for chat_id in set(channels):
+            if chat_id in sent_ids:
+                continue
             if await send_telegram_message(session, chat_id, text):
                 sent += 1
+                sent_ids.add(chat_id)
 
     # 2. Users (Pro Tier get filtered content)
     if include_users:
         users = await asyncio.to_thread(database.get_active_users)
         for user_id in set(users):
+            if user_id in sent_ids:
+                continue
+                
             tier = await asyncio.to_thread(database.get_user_tier, user_id)
             if tier == 'pro':
                 watchlist = await asyncio.to_thread(database.get_watchlist, user_id)
                 if watchlist:
-                    # Case-insensitive check if any watchlist coin is mentioned in the alert
-                    # This fulfills the promise: "Every digest & alert follows YOUR watchlist"
                     mention_found = any(coin.upper() in text.upper() for coin in watchlist)
                     if not mention_found:
                         continue
             
             if await send_telegram_message(session, user_id, text):
                 sent += 1
+                sent_ids.add(user_id)
                 
     return sent
 

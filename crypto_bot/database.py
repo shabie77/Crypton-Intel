@@ -1,9 +1,15 @@
 import os
 import sqlite3
+import asyncio
+from datetime import datetime, timezone, timedelta
 
-DB_FILE = os.getenv("DB_FILE", "subscribers.db")
+# Persistence Settings
+DATA_DIR = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", os.path.join(os.getcwd(), "data"))
+DB_FILE = os.getenv("DB_FILE", os.path.join(DATA_DIR, "subscribers.db"))
+
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "1120431469")
 FORCE_ADMIN_PRO = True
+
 
 def _connect():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -22,8 +28,7 @@ def init_db():
     conn = _connect()
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id     TEXT PRIMARY KEY,
                 username    TEXT,
@@ -33,8 +38,7 @@ def init_db():
                 pro_since   TEXT,
                 pro_expiry  TEXT
             )
-            """
-        )
+            """)
 
         cursor.execute("PRAGMA table_info(users)")
         columns = [info[1] for info in cursor.fetchall()]
@@ -54,17 +58,14 @@ def init_db():
         cursor.execute("UPDATE users SET status = 'ACTIVE' WHERE status IS NULL")
         cursor.execute("UPDATE users SET tier = 'free' WHERE tier IS NULL")
 
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_watchlist (
                 user_id TEXT,
                 coin    TEXT,
                 PRIMARY KEY (user_id, coin)
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS price_alerts (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id             TEXT,
@@ -75,19 +76,15 @@ def init_db():
                 is_paused           INTEGER DEFAULT 0,
                 last_triggered_at   TIMESTAMP
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_usage (
                 user_id         TEXT PRIMARY KEY,
                 date            TEXT,
                 digest_count    INTEGER DEFAULT 0
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS alert_cooldown (
                 user_id      TEXT,
                 coin         TEXT,
@@ -95,18 +92,14 @@ def init_db():
                 last_sent_at TIMESTAMP,
                 PRIMARY KEY (user_id, coin, alert_type)
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS news_seen (
                 hash    TEXT PRIMARY KEY,
                 seen_at TIMESTAMP
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS weekly_data (
                 user_id             TEXT,
                 week_start          DATE,
@@ -116,20 +109,16 @@ def init_db():
                 alerts_triggered    INTEGER DEFAULT 0,
                 PRIMARY KEY (user_id, week_start, coin)
             )
-            """
-        )
+            """)
 
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS channels (
                 channel_id TEXT PRIMARY KEY,
                 channel_name TEXT,
                 status TEXT
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS alerts_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 alert_type TEXT,
@@ -137,10 +126,8 @@ def init_db():
                 content TEXT,
                 timestamp TEXT
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS liquidations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT,
@@ -148,10 +135,60 @@ def init_db():
                 value REAL,
                 timestamp TEXT
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS signal_history (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol              TEXT,
+                signal_type         TEXT,
+                direction           TEXT,
+                score               INTEGER,
+                trend_score         INTEGER,
+                volume_score        INTEGER,
+                rsi_score           INTEGER,
+                liq_score           INTEGER,
+                pulse_score         INTEGER,
+                alignment_score     INTEGER,
+                strength            TEXT,
+                rationale           TEXT,
+                market_pulse        INTEGER,
+                timeframe           TEXT,
+                price_at_signal     REAL,
+                price_after_1h      REAL,
+                price_after_4h      REAL,
+                outcome             TEXT,
+                timestamp           TEXT,
+                raw_rsi             REAL,
+                raw_vol_ratio       REAL,
+                raw_long_liq        REAL,
+                raw_short_liq       REAL
+            )
+            """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_history_symbol ON signal_history(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_history_timestamp ON signal_history(timestamp)")
+
+        # Migration for signal_history
+        cursor.execute("PRAGMA table_info(signal_history)")
+        sig_cols = [info[1] for info in cursor.fetchall()]
+        for col in ["raw_rsi", "raw_vol_ratio", "raw_long_liq", "raw_short_liq"]:
+            if col not in sig_cols:
+                cursor.execute(f"ALTER TABLE signal_history ADD COLUMN {col} REAL")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bot_config (
+                key     TEXT PRIMARY KEY,
+                value   TEXT
+            )
+            """)
+        cursor.execute("INSERT OR IGNORE INTO bot_config (key, value) VALUES ('signal_sensitivity', '55')")
+
+        # alert_cooldown migration
+        cursor.execute("PRAGMA table_info(alert_cooldown)")
+        cooldown_cols = [info[1] for info in cursor.fetchall()]
+        if "cooldown_minutes" not in cooldown_cols:
+            cursor.execute("ALTER TABLE alert_cooldown ADD COLUMN cooldown_minutes INTEGER DEFAULT 15")
+
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS payments (
                 payment_id      TEXT PRIMARY KEY,
                 user_id         TEXT,
@@ -160,10 +197,8 @@ def init_db():
                 currency        TEXT,
                 processed_at    TEXT
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS admin_actions (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 admin_id        TEXT,
@@ -171,8 +206,7 @@ def init_db():
                 action          TEXT,
                 timestamp       TEXT
             )
-            """
-        )
+            """)
 
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_liq_timestamp ON liquidations(timestamp);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts_log(timestamp);")
@@ -185,13 +219,13 @@ def init_db():
                 """
                 INSERT INTO users (user_id, username, full_name, status, tier)
                 VALUES (?, 'admin', 'Pes_Store (Admin)', 'ACTIVE', 'pro')
-                ON CONFLICT(user_id) DO UPDATE SET 
+                ON CONFLICT(user_id) DO UPDATE SET
                     tier = 'pro',
                     status = 'ACTIVE'
                 """,
-                (str(ADMIN_USER_ID),)
+                (str(ADMIN_USER_ID),),
             )
-        
+
         conn.commit()
     finally:
         conn.close()
@@ -400,9 +434,7 @@ def get_all_channels():
     conn = _connect()
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT channel_id, channel_name, status FROM channels ORDER BY channel_name COLLATE NOCASE"
-        )
+        cursor.execute("SELECT channel_id, channel_name, status FROM channels ORDER BY channel_name COLLATE NOCASE")
         rows = cursor.fetchall()
     finally:
         conn.close()
@@ -413,9 +445,7 @@ def get_all_users():
     conn = _connect()
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT user_id, username, full_name, status FROM users ORDER BY full_name COLLATE NOCASE"
-        )
+        cursor.execute("SELECT user_id, username, full_name, status FROM users ORDER BY full_name COLLATE NOCASE")
         rows = cursor.fetchall()
     finally:
         conn.close()
@@ -479,8 +509,6 @@ def get_24h_liquidation_stats(iso_cutoff):
 
 
 async def cleanup_old_data():
-    import asyncio
-
     def _run_delete():
         conn = _connect()
         try:
@@ -497,7 +525,6 @@ async def cleanup_old_data():
 
 
 def upgrade_user(user_id, plan_id, amount, currency):
-    from datetime import datetime, timedelta, timezone
 
     now = datetime.now(timezone.utc)
     pro_since = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -530,7 +557,6 @@ def upgrade_user(user_id, plan_id, amount, currency):
 
 
 def record_payment(payment_id, user_id, event_type, amount, currency):
-    from datetime import datetime, timezone
 
     processed_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conn = _connect()
@@ -552,14 +578,13 @@ def record_payment(payment_id, user_id, event_type, amount, currency):
 
 def set_user_tier(admin_id, user_id, tier):
     """Admin-only function to force set a user's tier with audit logging."""
-    from datetime import datetime, timezone, timedelta
-    
+
     conn = _connect()
     try:
         cursor = conn.cursor()
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         user_id = str(user_id)
-        
+
         if tier == "pro":
             expiry = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
             # UPSERT user as Pro
@@ -606,21 +631,228 @@ def set_user_tier(admin_id, user_id, tier):
         conn.close()
 
 
-def get_all_users_with_tiers():
-    """Returns user_id, username, tier, pro_expiry for all users."""
+def log_signal(
+    symbol,
+    signal_type,
+    direction,
+    score,
+    trend_score,
+    volume_score,
+    rsi_score,
+    liq_score,
+    pulse_score,
+    alignment_score,
+    strength,
+    rationale,
+    market_pulse,
+    timeframe,
+    price_at_signal,
+    raw_rsi,
+    raw_vol_ratio,
+    raw_long_liq,
+    raw_short_liq,
+):
+    """Logs a generated signal to signal_history including raw evidence for backtesting."""
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO signal_history (
+                symbol, signal_type, direction, score,
+                trend_score, volume_score, rsi_score, liq_score,
+                pulse_score, alignment_score, strength, rationale,
+                market_pulse, timeframe, price_at_signal, timestamp,
+                raw_rsi, raw_vol_ratio, raw_long_liq, raw_short_liq
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                symbol,
+                signal_type,
+                direction,
+                score,
+                trend_score,
+                volume_score,
+                rsi_score,
+                liq_score,
+                pulse_score,
+                alignment_score,
+                strength,
+                rationale,
+                market_pulse,
+                timeframe,
+                price_at_signal,
+                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                raw_rsi,
+                raw_vol_ratio,
+                raw_long_liq,
+                raw_short_liq,
+            ),
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"❌ log_signal error: {e}")
+    finally:
+        conn.close()
+
+
+def get_sensitivity():
+    """Returns the current signal broadcast threshold. Default 55."""
     conn = _connect()
     try:
         cursor = conn.cursor()
+        cursor.execute("SELECT value FROM bot_config WHERE key = 'signal_sensitivity'")
+        row = cursor.fetchone()
+        return int(row[0]) if row else 55
+    except Exception:
+        return 55
+    finally:
+        conn.close()
+
+
+def set_sensitivity(value):
+    """Updates the signal broadcast threshold. Value must be 40–90."""
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO bot_config (key, value) VALUES ('signal_sensitivity', ?)
+            ON CONFLICT(key) DO UPDATE SET value = ?
+        """,
+            (str(value), str(value)),
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"❌ set_sensitivity error: {e}")
+    finally:
+        conn.close()
+
+
+def get_coin_liquidations_30min(symbol, side):
+    """Returns per-coin liquidation data filtered to last 30 minutes."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S UTC")
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        # Fix: Using LIKE to handle symbol vs pair mismatch (e.g. BTC vs BTCUSDT)
         cursor.execute(
             """
-            SELECT user_id, username, tier, pro_expiry 
-            FROM users 
-            ORDER BY 
-                CASE WHEN tier='pro' THEN 0 ELSE 1 END,
-                COALESCE(username, user_id) COLLATE NOCASE
-            """
+            SELECT SUM(value) FROM liquidations
+            WHERE symbol LIKE ? AND side = ? AND timestamp >= ?
+        """,
+            (f"%{symbol}%", side, cutoff),
         )
+        row = cursor.fetchone()
+        return float(row[0]) if row and row[0] is not None else 0.0
+    except Exception as e:
+        print(f"❌ get_coin_liquidations_30min error: {e}")
+        return 0.0
+    finally:
+        conn.close()
+
+
+def claim_cooldown_for_user(user_id, coin, alert_type, cooldown_minutes=15):
+    """
+    Atomically checks if a user is in cooldown, and if not, updates the timestamp.
+    Returns True if the alert should be sent, False if it is blocked by cooldown.
+    """
+    now_dt = datetime.now(timezone.utc)
+    now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")  # Start write transaction for atomicity
+
+        cursor.execute(
+            """
+            SELECT last_sent_at FROM alert_cooldown
+            WHERE user_id = ? AND coin = ? AND alert_type = ?
+        """,
+            (str(user_id), coin, alert_type),
+        )
+
+        row = cursor.fetchone()
+        if row:
+            last_sent_str = row[0]
+            try:
+                # Handle both timestamp formats just in case
+                if "UTC" in last_sent_str:
+                    last_sent = datetime.strptime(last_sent_str, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+                else:
+                    last_sent = datetime.strptime(last_sent_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+
+                if now_dt - last_sent < timedelta(minutes=cooldown_minutes):
+                    conn.commit()
+                    return False  # Still in cooldown
+            except (ValueError, TypeError):
+                pass  # Parse error, assume cooldown is over
+
+        # Update/Insert new cooldown timestamp
+        cursor.execute(
+            """
+            INSERT INTO alert_cooldown (user_id, coin, alert_type, last_sent_at, cooldown_minutes)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, coin, alert_type)
+            DO UPDATE SET last_sent_at = ?, cooldown_minutes = ?
+        """,
+            (str(user_id), coin, alert_type, now_str, cooldown_minutes, now_str, cooldown_minutes),
+        )
+
+        conn.commit()
+        return True  # Successfully claimed
+    except Exception as e:
+        conn.rollback()
+        print(f"❌ claim_cooldown_for_user error: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_user_pro_info(user_id):
+    """Returns (tier, pro_since) tuple for a user."""
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT tier, pro_since FROM users WHERE user_id = ?", (str(user_id),))
+        row = cursor.fetchone()
+        return row if row else ("free", None)
+    except Exception:
+        return "free", None
+    finally:
+        conn.close()
+
+
+def get_all_users_with_tiers():
+    """Returns user_id, username, effective_tier, pro_expiry for all ACTIVE users."""
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id, username,
+                   CASE
+                       WHEN tier = 'pro' AND (pro_expiry IS NULL OR pro_expiry > CURRENT_TIMESTAMP) THEN 'pro'
+                       ELSE 'free'
+                   END as effective_tier,
+                   pro_expiry
+            FROM users
+            WHERE status = 'ACTIVE'
+            ORDER BY
+                CASE WHEN effective_tier='pro' THEN 0 ELSE 1 END,
+                COALESCE(username, user_id) COLLATE NOCASE
+            """)
         return cursor.fetchall()
     finally:
         conn.close()
 
+
+def reset_cooldown_for_user(user_id, coin, alert_type):
+    """Resets the cooldown for a specific user and coin if a send fails."""
+    conn = _connect()
+    try:
+        conn.execute(
+            "DELETE FROM alert_cooldown WHERE user_id = ? AND coin = ? AND alert_type = ?",
+            (str(user_id), str(coin), alert_type),
+        )
+        conn.commit()
+    finally:
+        conn.close()

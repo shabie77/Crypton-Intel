@@ -1,0 +1,19 @@
+# Local Environment
+.env
+venv/
+__pycache__/
+*.pyc
+
+# Data & Persistence
+data/
+subscribers.db
+rsi_state.json
+last_digest.txt
+config.json
+
+# Tooling/Logs
+.ruff_cache/
+flake8_*.txt
+all_errors.txt
+macro_debug.xml
+CRYPTO_ANALYST_BOT_IMPLEMENTATION_PLAN.html

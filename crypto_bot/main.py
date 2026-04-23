@@ -1947,6 +1947,37 @@ async def handle_admin_command(session, command, args, chat_id):
         await send_telegram_message(session, chat_id, f"✅ Signal sensitivity updated to {new_val}/100.")
         return
 
+    if command == "/testsignal":
+        symbol = args.strip().upper() if args else "BTC"
+        await send_telegram_message(session, chat_id, f"🔍 Simulating Intelligence Signal for {symbol}...")
+        
+        # 1. Fetch current price
+        price_url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
+        price_data = await fetch_with_backoff(session, price_url)
+        current_price = float(price_data['price']) if price_data else 0.0
+        
+        # 2. Fetch dummy market context for the simulation
+        # In a real signal, these are fetched from live data. 
+        # Here we use defaults to show you the visual structure.
+        liq_data = {"longs": 55000, "shorts": 12000} 
+        pulse_score = 25 # Extreme Fear
+        
+        from utils.scoring_engine import calculate_score
+        signal_result = calculate_score(
+            symbol=symbol,
+            direction="LONG",
+            rsi=28,
+            volume_ratio=2.1,
+            trend_4h="BEAR",
+            trend_1d="BULL",
+            liq_data=liq_data,
+            market_pulse=pulse_score
+        )
+        
+        # 3. Dispatch the test alert
+        await dispatch_signal_alert(session, signal_result, current_price)
+        return
+
     if command == "/macro":
         result = await fetch_weekly_macro_events(session)
         events = result.get("events", [])

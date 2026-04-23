@@ -312,6 +312,8 @@ def add_user(user_id, username, full_name):
 
 
 def get_user_tier(user_id):
+    if str(user_id) == str(ADMIN_USER_ID):
+        return "pro"
     conn = _connect()
     try:
         cursor = conn.cursor()
@@ -830,6 +832,7 @@ def get_all_users_with_tiers():
         cursor.execute("""
             SELECT user_id, username,
                    CASE
+                       WHEN user_id = ? THEN 'pro'
                        WHEN tier = 'pro' AND (pro_expiry IS NULL OR pro_expiry > CURRENT_TIMESTAMP) THEN 'pro'
                        ELSE 'free'
                    END as effective_tier,
@@ -839,7 +842,7 @@ def get_all_users_with_tiers():
             ORDER BY
                 CASE WHEN effective_tier='pro' THEN 0 ELSE 1 END,
                 COALESCE(username, user_id) COLLATE NOCASE
-            """)
+            """, (str(ADMIN_USER_ID),))
         return cursor.fetchall()
     finally:
         conn.close()

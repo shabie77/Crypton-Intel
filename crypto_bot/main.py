@@ -365,7 +365,7 @@ async def dispatch_signal_alert(session, signal_result, current_price):
         f"<i>Market analysis only. Not financial advice.</i>"
     )
 
-    rationale_lines = "\n".join([f"  {r}" for r in rationale])
+    rationale_lines = "\n".join([f"  • {html_safe(r)}" for r in rationale])
     focus = "High conviction setup." if score >= 80 else "Monitor for confirmation."
     if direction == "LONG":
         focus = (
@@ -379,6 +379,7 @@ async def dispatch_signal_alert(session, signal_result, current_price):
             if score >= 80
             else "Overbought condition. Look for rejection."
         )
+    focus = html_safe(focus)
 
     pro_msg = (
         f"🚨 <b>{symbol} Intelligence Signal</b>\n\n"
@@ -1439,16 +1440,15 @@ def build_help_message(is_admin):
         "/prolist — List Pro users only",
         "/setpro &lt;id&gt; — Manual Pro upgrade",
         "/setfree &lt;id&gt; — Manual Pro downgrade",
-        "/send &lt;message&gt; — Broadcast message",
-        "/setsensitivity &lt;number&gt; — Set signal strictness",
-        "/digest — Broadcast digest now",
+        "/send &lt;message&gt; - Broadcast message",
+        "/setsensitivity &lt;number&gt; - Set signal strictness",
+        "/testsignal &lt;symbol&gt; - Private intelligence test",
+        "/signal &lt;symbol&gt; - Manual broadcast to all users",
+        "/digest - Broadcast digest now",
         "/test_digest — Private test digest",
         "/update_powell &lt;stance&gt; &lt;score&gt; &lt;note&gt;",
         "/update_etf &lt;summary&gt;",
-        "/update_coins &lt;add/remove&gt; &lt;symbol&gt;",
-        "/revoke &lt;name/id&gt;",
         "/renew &lt;name/id&gt;",
-        "/testsignal &lt;symbol&gt; - Simulate a scored signal",
     ]
     return "\n".join(common_lines + [""] + admin_lines)
 
@@ -1804,6 +1804,9 @@ async def register_admin_commands(session):
         {"command": "prolist", "description": "List Pro users only"},
         {"command": "listusers", "description": "Detailed user directory"},
         {"command": "send", "description": "Broadcast message to all users"},
+        {"command": "setsensitivity", "description": "Set signal strictness"},
+        {"command": "testsignal", "description": "Simulate signal privately"},
+        {"command": "signal", "description": "Manual broadcast signal"},
     ]
 
     try:
@@ -1950,35 +1953,72 @@ async def handle_admin_command(session, command, args, chat_id):
 
     if command == "/testsignal":
         symbol = args.strip().upper() if args else "BTC"
-        await send_telegram_message(session, chat_id, f"🔍 Simulating Intelligence Signal for {symbol}...")
+        await send_telegram_message(session, chat_id, f"🔍 Simulating Private Intelligence Signal for {symbol}...")
         
-        # 1. Fetch current price
+        # Fetch current price
         price_url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
         price_data = await fetch_with_backoff(session, price_url)
         current_price = float(price_data['price']) if price_data else 0.0
         
-        # 2. Fetch dummy market context for the simulation
-        # In a real signal, these are fetched from live data. 
-        # Here we use defaults to show you the visual structure.
+        # Dummy market context
         liq_data = {"longs": 55000, "shorts": 12000} 
         pulse_score = 25 # Extreme Fear
         
         from utils.scoring_engine import calculate_score
-        # Construct the data object required by the scoring engine
         test_data = {
             "symbol": symbol,
             "price": current_price,
-            "sma50": current_price * 0.98, # Simulate price above SMA
-            "rsi": 28, # Simulate oversold
-            "volume_ratio": 2.1, # Simulate high volume
+            "sma50": current_price * 0.98,
+            "rsi": 28,
+            "volume_ratio": 2.1,
             "trend_4h": "BEAR",
             "trend_1d": "BULL"
         }
         
         signal_result = calculate_score(test_data, pulse_score, liq_data)
+        if signal_result:
+            # SEND ONLY TO THE ADMIN (Private)
+            # Use logic to pick pro_msg since admin is pro
+            pro_msg = (
+                f"🚨 <b>{html_safe(symbol)} Intelligence Signal</b> (Private Test)\n\n"
+                f"Direction: 🟢 LONG — Oversold Setup\n"
+                f"Price: ${current_price:,.2f}\n\n"
+                f"📊 Signal Confidence: {signal_result['meter']} {signal_result['score']}%\n"
+                f"Strength: <b>{html_safe(signal_result['strength'])}</b>\n\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"<b>Confluence Breakdown:</b>\n"
+                f"{chr(10).join(['  • ' + html_safe(r) for r in signal_result['rationale']])}\n\n"
+                f"<b>Focus:</b>\n"
+                f"{html_safe('High conviction oversold setup. Watch for volume confirmation on the bounce.' if signal_result['score'] >= 80 else 'Oversold condition. Wait for stabilization.')}\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"<i>Market analysis only. Not financial advice.</i>"
+            )
+            await send_telegram_message(session, chat_id, pro_msg)
+        return
+
+    if command == "/signal":
+        symbol = args.strip().upper() if args else "BTC"
+        await send_telegram_message(session, chat_id, f"🚨 Triggering Manual BROADCAST for {symbol}...")
         
-        # 3. Dispatch the test alert
-        await dispatch_signal_alert(session, signal_result, current_price)
+        # Fetch price
+        price_url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
+        price_data = await fetch_with_backoff(session, price_url)
+        current_price = float(price_data['price']) if price_data else 0.0
+        
+        # Dummy context
+        liq_data = {"longs": 55000, "shorts": 12000} 
+        pulse_score = 25 
+        
+        from utils.scoring_engine import calculate_score
+        test_data = {
+            "symbol": symbol, "price": current_price, "sma50": current_price * 0.98,
+            "rsi": 28, "volume_ratio": 2.1, "trend_4h": "BEAR", "trend_1d": "BULL"
+        }
+        
+        signal_result = calculate_score(test_data, pulse_score, liq_data)
+        if signal_result:
+            # BROADCAST TO EVERYONE
+            await dispatch_signal_alert(session, signal_result, current_price)
         return
 
     if command == "/macro":

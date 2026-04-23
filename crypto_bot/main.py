@@ -1448,6 +1448,7 @@ def build_help_message(is_admin):
         "/update_coins &lt;add/remove&gt; &lt;symbol&gt;",
         "/revoke &lt;name/id&gt;",
         "/renew &lt;name/id&gt;",
+        "/testsignal &lt;symbol&gt; - Simulate a scored signal",
     ]
     return "\n".join(common_lines + [""] + admin_lines)
 
@@ -1963,16 +1964,18 @@ async def handle_admin_command(session, command, args, chat_id):
         pulse_score = 25 # Extreme Fear
         
         from utils.scoring_engine import calculate_score
-        signal_result = calculate_score(
-            symbol=symbol,
-            direction="LONG",
-            rsi=28,
-            volume_ratio=2.1,
-            trend_4h="BEAR",
-            trend_1d="BULL",
-            liq_data=liq_data,
-            market_pulse=pulse_score
-        )
+        # Construct the data object required by the scoring engine
+        test_data = {
+            "symbol": symbol,
+            "price": current_price,
+            "sma50": current_price * 0.98, # Simulate price above SMA
+            "rsi": 28, # Simulate oversold
+            "volume_ratio": 2.1, # Simulate high volume
+            "trend_4h": "BEAR",
+            "trend_1d": "BULL"
+        }
+        
+        signal_result = calculate_score(test_data, pulse_score, liq_data)
         
         # 3. Dispatch the test alert
         await dispatch_signal_alert(session, signal_result, current_price)

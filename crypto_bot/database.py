@@ -683,7 +683,7 @@ def log_signal(
                 market_pulse,
                 timeframe,
                 price_at_signal,
-                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 raw_rsi,
                 raw_vol_ratio,
                 raw_long_liq,
@@ -731,7 +731,7 @@ def set_sensitivity(value):
 
 def get_coin_liquidations_30min(symbol, side):
     """Returns per-coin liquidation data filtered to last 30 minutes."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S UTC")
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
     conn = _connect()
     try:
         cursor = conn.cursor()
@@ -758,7 +758,7 @@ def claim_cooldown_for_user(user_id, coin, alert_type, cooldown_minutes=15):
     Returns True if the alert should be sent, False if it is blocked by cooldown.
     """
     now_dt = datetime.now(timezone.utc)
-    now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     conn = _connect()
     try:
@@ -777,12 +777,7 @@ def claim_cooldown_for_user(user_id, coin, alert_type, cooldown_minutes=15):
         if row:
             last_sent_str = row[0]
             try:
-                # Handle both timestamp formats just in case
-                if "UTC" in last_sent_str:
-                    last_sent = datetime.strptime(last_sent_str, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
-                else:
-                    last_sent = datetime.strptime(last_sent_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-
+                last_sent = datetime.strptime(last_sent_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
                 if now_dt - last_sent < timedelta(minutes=cooldown_minutes):
                     conn.commit()
                     return False  # Still in cooldown

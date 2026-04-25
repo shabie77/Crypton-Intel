@@ -1,22 +1,29 @@
-import asyncio
-import html
-import json
 import os
+import json
+import asyncio
 import re
+import html
 import traceback
-from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
-
+from datetime import datetime, timezone, timedelta
+import logging
 import aiohttp
 import websockets
 from dotenv import load_dotenv
-from bs4 import BeautifulSoup
-import xml.etree.ElementTree as ET
 
 import database
 from utils.gemini_rotator import GeminiRotator, GroqRotator
 from utils.scoring_engine import calculate_score
+from utils.scrapers import fetch_top_news, fetch_macro_events, classify_news_importance
 from webhook_server import run_webhook_server
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("CryptoBot")
+
 
 load_dotenv()
 
@@ -51,6 +58,8 @@ LAST_DIGEST_FILE = os.getenv("LAST_DIGEST_FILE", os.path.join(DATA_DIR, "last_di
 CONFIG_FILE = os.getenv("CONFIG_FILE", os.path.join(DATA_DIR, "config.json"))
 STARTED_AT = datetime.now(timezone.utc)
 CONFIG_LOCK = asyncio.Lock()
+RSI_STATE_LOCK = asyncio.Lock()
+BROADCAST_SEMAPHORE = asyncio.Semaphore(25)  # Global rate limit (Telegram threshold 30/s)
 
 database.init_db()
 
@@ -100,7 +109,7 @@ def utc_now():
 
 
 def iso_now():
-    return utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
+    return utc_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def ist_now():
@@ -193,11 +202,13 @@ def load_rsi_state():
     return normalized
 
 
-def save_rsi_state(state):
-    try:
-        write_json_file(RSI_STATE_FILE, state)
-    except Exception as exc:
-        print(f"Error saving RSI state to {RSI_STATE_FILE}: {exc}")
+async def save_rsi_state(state):
+    async with RSI_STATE_LOCK:
+        try:
+            await asyncio.to_thread(write_json_file, RSI_STATE_FILE, state)
+        except Exception as exc:
+            logger.error(f"Error saving RSI state: {exc}")
+
 
 
 def load_news_state():
@@ -344,7 +355,6 @@ async def dispatch_signal_alert(session, signal_result, current_price):
     """
     symbol = signal_result["symbol"]
     score = signal_result["score"]
-    strength = signal_result["strength"]
     direction = signal_result["direction"]
     meter = signal_result["meter"]
     rationale = signal_result["rationale"]
@@ -352,46 +362,117 @@ async def dispatch_signal_alert(session, signal_result, current_price):
     direction_emoji = "🟢" if direction == "LONG" else "🔴"
     direction_label = "LONG — Oversold Setup" if direction == "LONG" else "SHORT — Overbought Setup"
 
-    # ---- MESSAGES ----
+    # 1. QUICK DECISION
+    if score >= 70:
+        decision = "✅ ACTIONABLE — levels are your guide"
+    elif score >= 55:
+        decision = "⚠️ WAIT — not fully confirmed yet"
+    else:
+        decision = "❌ WEAK — low confidence, skip this one"
+    quick_decision = f"📌 Quick Decision: {decision}"
+
+    # 2. STRENGTH DISPLAY MAPPING
+    strength_display = {
+        "HIGH CONVICTION": "High Confidence — strong setup",
+        "STRONG":          "Good Confidence — setup developing well",
+        "MODERATE":        "Medium — needs confirmation",
+        "WEAK":            "Low — early stage only"
+    }.get(signal_result["strength"], signal_result["strength"])
+
+    # 3. RATIONALE PLAIN LANGUAGE MAPPING
+    def clean_rationale(text):
+        mapping = {
+            "SMA50": "50-day average",
+            "HTF": "short-term and daily trends",
+            "delta": "pressure"
+        }
+        for k, v in mapping.items():
+            text = text.replace(k, v)
+        return text
+    
+    rationale_lines = "\n".join([f"  • {html_safe(clean_rationale(r))}" for r in rationale])
+
+    # 4. GEMINI "WHAT TO WATCH"
+    prompt = (
+        f"You are a crypto market assistant. Given this signal:\n"
+        f"- Asset: {symbol}\n"
+        f"- Direction: {direction}\n"
+        f"- Current Price: ${current_price}\n"
+        f"- Signal Score: {score}/100\n\n"
+        f"Output EXACTLY two lines. No explanation. No extra text.\n\n"
+        f"Line 1: Hold above $[support level] = setup strengthens\n"
+        f"Line 2: Drop below $[invalidation level] = setup fails\n\n"
+        f"Rules:\n"
+        f"- BTC → round to nearest $50\n"
+        f"- ETH/SOL → nearest $5\n"
+        f"- XRP/ADA → nearest $0.05\n\n"
+        f"⚠️ If output is not exactly 2 lines → fallback to default static levels."
+    )
+    
+    try:
+        raw_res = await call_gemini_rest(session, prompt) or await call_groq_rest(session, prompt)
+        if raw_res and len(raw_res.strip().split("\n")) == 2:
+            what_to_watch = html_safe(raw_res.strip())
+        else:
+            # Fallback
+            support = current_price * 0.98 if direction == "LONG" else current_price * 1.02
+            invalid = current_price * 0.95 if direction == "LONG" else current_price * 1.05
+            what_to_watch = f"Hold above ${support:,.2f} = setup strengthens\nDrop below ${invalid:,.2f} = setup fails"
+    except Exception:
+        what_to_watch = "Monitor levels for confirmation."
+
+    # 5. INSIGHT LINE
+    if score >= 76:
+        insight = "📍 Insight: Strong setup — watch your levels closely"
+    elif score >= 65:
+        insight = "📍 Insight: Developing setup — wait for confirmation"
+    else:
+        insight = "📍 Insight: Early-stage signal — wait for confirmation"
+
+    # ---- PRO MESSAGE STRUCTURE ----
+    pro_msg = (
+        f"🚨 <b>{symbol} Intelligence Signal</b>\n\n"
+        f"Direction: {direction_emoji} {direction_label}\n"
+        f"Price: ${current_price:,.2f}\n"
+        f"{quick_decision}\n\n"
+        f"📊 Confidence: {meter} {score}%\n"
+        f"👉 {strength_display}\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"<b>Why This Signal Fired</b>\n"
+        f"{rationale_lines}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"<b>What to Watch</b>\n"
+        f"{what_to_watch}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"{insight}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"<i>Market analysis only. Not financial advice.</i>"
+    )
+
+    # ---- FREE MESSAGE STRUCTURE ----
+    # Summary + Action for Free
+    if direction == "LONG":
+        summary = "Strong oversold setup — bounce likely" if score >= 70 else "Possible bounce — not confirmed yet"
+    else:
+        summary = "Strong overbought setup — pullback likely" if score >= 70 else "Possible pullback — not confirmed yet"
+
+    if score >= 70:
+        action = "✅ Actionable — watch levels"
+    elif score >= 55:
+        action = "⚠️ Wait before entering"
+    else:
+        action = "❌ Skip — weak setup"
+
     free_msg = (
         f"🚨 <b>{symbol} Signal Detected</b>\n\n"
         f"Direction: {direction_emoji} {direction_label}\n"
         f"Price: ${current_price:,.2f}\n\n"
-        f"📊 Signal Confidence: {meter} {score}%\n"
-        f"Strength: <b>{strength}</b>\n\n"
-        f"<i>Upgrade to Pro for full signal breakdown,\n"
-        f"rationale, and actionable focus note.</i>\n"
-        f"/upgrade\n\n"
-        f"<i>Market analysis only. Not financial advice.</i>"
-    )
-
-    rationale_lines = "\n".join([f"  • {html_safe(r)}" for r in rationale])
-    focus = "High conviction setup." if score >= 80 else "Monitor for confirmation."
-    if direction == "LONG":
-        focus = (
-            "High conviction oversold setup. Watch for volume confirmation on the bounce."
-            if score >= 80
-            else "Oversold condition. Wait for stabilization."
-        )
-    else:
-        focus = (
-            "High conviction overbought setup. Watch for momentum exhaustion."
-            if score >= 80
-            else "Overbought condition. Look for rejection."
-        )
-    focus = html_safe(focus)
-
-    pro_msg = (
-        f"🚨 <b>{symbol} Intelligence Signal</b>\n\n"
-        f"Direction: {direction_emoji} {direction_label}\n"
-        f"Price: ${current_price:,.2f}\n\n"
-        f"📊 Signal Confidence: {meter} {score}%\n"
-        f"Strength: <b>{strength}</b>\n\n"
+        f"📝 {summary}\n"
+        f"🎯 Action: {action}\n\n"
+        f"📊 Confidence: {meter} {score}%\n\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"<b>Confluence Breakdown:</b>\n"
-        f"{rationale_lines}\n\n"
-        f"<b>Focus:</b>\n"
-        f"{focus}\n"
+        f"💎 Want to know WHY this signal fired\n"
+        f"and the exact price levels? → /upgrade\n"
         f"━━━━━━━━━━━━━━━\n"
         f"<i>Market analysis only. Not financial advice.</i>"
     )
@@ -401,30 +482,28 @@ async def dispatch_signal_alert(session, signal_result, current_price):
     users_with_tiers = await asyncio.to_thread(database.get_all_users_with_tiers)
     active_channels = await asyncio.to_thread(database.get_active_channels)
 
-    semaphore = asyncio.Semaphore(20)
-
-    async def send_to_user(user_id, tier):
-        async with semaphore:
-            cooldown_mins = 5 if tier == "pro" else 15
-            # Atomic cooldown claim
-            if not await asyncio.to_thread(database.claim_cooldown_for_user, user_id, symbol, "signal", cooldown_mins):
-                return
-
-            msg = pro_msg if tier == "pro" else free_msg
-            success = await send_telegram_message(session, user_id, msg)
-            if not success:
-                # If send failed after all retries, release the cooldown so they don't miss the next one
-                await asyncio.to_thread(database.reset_cooldown_for_user, user_id, symbol, "signal")
-
-    async def send_to_channel(channel_id):
-        async with semaphore:
-            await send_telegram_message(session, channel_id, free_msg)
-
     # 2. Parallelize broadcast
-    user_tasks = [send_to_user(u[0], u[2]) for u in users_with_tiers]
-    chan_tasks = [send_to_channel(c) for c in active_channels]
+    async def send_to_user(uid, tier):
+        # Filter: Pro users get full rationale, Free users get teaser
+        msg = pro_msg if tier == "pro" else free_msg
+        
+        # Watchlist filtering for Pro
+        if tier == "pro":
+            watchlist = await asyncio.to_thread(database.get_watchlist, uid)
+            if watchlist and symbol.upper() not in [c.upper() for c in watchlist]:
+                return
+                
+        await send_telegram_message(session, uid, msg)
 
-    await asyncio.gather(*(user_tasks + chan_tasks), return_exceptions=True)
+    async def send_to_channel(cid):
+        # Channels always get full Pro-tier signals
+        await send_telegram_message(session, cid, pro_msg)
+
+    async with BROADCAST_SEMAPHORE:
+        user_tasks = [send_to_user(u[0], u[2]) for u in users_with_tiers]
+        chan_tasks = [send_to_channel(c) for c in active_channels]
+        await asyncio.gather(*(user_tasks + chan_tasks), return_exceptions=True)
+
 
 
 def html_safe(value):
@@ -479,64 +558,6 @@ def classify_bias(text):
     return "neutral"
 
 
-def classify_news_importance(title):
-    """Returns a dictionary with level, emoji, and a brief impact explanation."""
-    title_lower = title.lower()
-    critical_kws = (
-        "hack",
-        "exploit",
-        "stolen",
-        "ban",
-        "banned",
-        "arrest",
-        "sec sues",
-        "sec charges",
-        "etf approved",
-        "etf rejected",
-        "collapse",
-        "insolvent",
-        "emergency",
-        "halted",
-        "lawsuit",
-        "bankruptcy",
-    )
-    moderate_kws = (
-        "binance",
-        "blackrock",
-        "coinbase",
-        "etf",
-        "regulation",
-        "fed rate",
-        "interest rate",
-        "inflation",
-        "cpi",
-        "powell",
-        "grayscale",
-        "whale",
-        "ath",
-        "crash",
-        "dump",
-        "pump",
-        "bullish",
-        "bearish",
-        "market share",
-    )
-
-    if any(kw in title_lower for kw in critical_kws):
-        return {
-            "level": "CRITICAL",
-            "emoji": "🔴",
-            "impact": "Major regulatory development, security breach, or systemic shift.",
-        }
-    if any(kw in title_lower for kw in moderate_kws):
-        return {
-            "level": "MODERATE",
-            "emoji": "🟠",
-            "impact": "Significant market shift, institutional activity, or macro update.",
-        }
-    return {"level": "LOW", "emoji": "🟡", "impact": "General ecosystem update or standard market movement."}
-
-
 async def fetch_sma_trend(session, symbol, interval, limit=50):
     pair = symbol_to_pair(symbol)
     url = "https://api.binance.com/api/v3/klines"
@@ -549,11 +570,6 @@ async def fetch_sma_trend(session, symbol, interval, limit=50):
 
 
 async def fetch_coin_liquidations(session, symbol):
-    """
-    Binance mapping:
-    - BUY force order = Short position liquidated.
-    - SELL force order = Long position liquidated.
-    """
     shorts = await asyncio.to_thread(database.get_coin_liquidations_30min, symbol, "BUY")
     longs = await asyncio.to_thread(database.get_coin_liquidations_30min, symbol, "SELL")
     return {"longs": longs, "shorts": shorts}
@@ -605,791 +621,141 @@ async def calculate_confluence_score(total_value, side, trend):
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
         return 50.0
-
     gains = []
     losses = []
-    for index in range(1, len(prices)):
-        change = prices[index] - prices[index - 1]
+    for i in range(1, len(prices)):
+        change = prices[i] - prices[i-1]
         if change > 0:
             gains.append(change)
             losses.append(0)
         else:
             gains.append(0)
             losses.append(abs(change))
-
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
-
-    for index in range(period, len(prices) - 1):
-        avg_gain = ((avg_gain * (period - 1)) + gains[index]) / period
-        avg_loss = ((avg_loss * (period - 1)) + losses[index]) / period
-
-    if avg_loss == 0:
-        return 100.0
+    for i in range(period, len(prices)):
+        avg_gain = (avg_gain * (period - 1) + gains[i-1]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i-1]) / period
+    if avg_loss == 0: return 100.0
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 
-# Global Market Cache to reduce API overhead during broadcasts
-# Global Caches & Locks
-_AI_SUMMARY_CACHE = {}  # {(snapshots_key, pulse_score): (summary, timestamp)}
-_MARKET_SNAPSHOT_CACHE = {}  # {symbol: (snapshot, timestamp)}
-
+_AI_SUMMARY_CACHE = {}
+_MARKET_SNAPSHOT_CACHE = {}
 _AI_CACHE_LOCK = asyncio.Lock()
 _MARKET_CACHE_LOCK = asyncio.Lock()
 
 
 async def fetch_symbol_snapshot(session, symbol, config):
-    """Fetches full market metrics for a coin with a short-lived cache."""
     now = datetime.now()
     async with _MARKET_CACHE_LOCK:
         if symbol in _MARKET_SNAPSHOT_CACHE:
-            cached_val, timestamp = _MARKET_SNAPSHOT_CACHE[symbol]
-            # 30-second cache is enough to cover a broadcast burst
-            if (now - timestamp).total_seconds() < 30:
-                return cached_val
-
+            val, ts = _MARKET_SNAPSHOT_CACHE[symbol]
+            if (now - ts).total_seconds() < 30: return val
         pair = symbol_to_pair(symbol)
         url = "https://api.binance.com/api/v3/klines"
         params = {"symbol": pair, "interval": "1d", "limit": 50}
         candles = await fetch_with_backoff(session, url, params)
-        if not candles:
-            return None
-
-        close_prices = [float(candle[4]) for candle in candles]
-        volumes = [float(candle[5]) for candle in candles]
+        if not candles: return None
+        close_prices = [float(c[4]) for c in candles]
+        volumes = [float(c[5]) for c in candles]
         current_price = close_prices[-1]
-        previous_price = close_prices[-2] if len(close_prices) > 1 else current_price
+        prev_price = close_prices[-2] if len(close_prices) > 1 else current_price
         sma_50 = sum(close_prices) / len(close_prices)
         rsi = calculate_rsi(close_prices)
-
-        # Yesterday's Completed Volume vs 20-day Moving Average (last 20 days)
-        current_volume = volumes[-2]
-        ma_period = 20
-        recent_volumes = volumes[-ma_period - 1:-1]
-        average_volume = sum(recent_volumes) / max(len(recent_volumes), 1)
-
-        volume_ratio = current_volume / average_volume if average_volume else 1.0
-        volume_percent = volume_ratio * 100
-        volume_delta = (volume_ratio - 1) * 100
-
-        change_24h = ((current_price - previous_price) / previous_price * 100) if previous_price else 0.0
+        current_vol = volumes[-2]
+        avg_vol = sum(volumes[-21:-1]) / 20
+        vol_ratio = current_vol / avg_vol if avg_vol else 1.0
+        change_24h = ((current_price - prev_price) / prev_price * 100) if prev_price else 0.0
         trend = "BULLISH 🟢" if current_price > sma_50 else "BEARISH 🔴"
-
-        vol_cfg = config.get("volume_settings", DEFAULT_CONFIG["volume_settings"])
-        if volume_percent >= vol_cfg["high"]:
-            volume_status = "HIGH 🟢"
-        elif volume_percent >= vol_cfg["normal"]:
-            volume_status = "NORMAL ⚪"
-        elif volume_percent >= vol_cfg["low"]:
-            volume_status = "LOW 🔴"
-        else:
-            volume_status = "VERY LOW 🔴"
-
         res = {
-            "symbol": pair,
-            "tag": pair_to_tag(pair),
-            "price": current_price,
-            "change_24h": change_24h,
-            "trend": trend,
-            "rsi": rsi,
-            "volume_percent": volume_percent,
-            "volume_delta": volume_delta,
-            "volume_status": volume_status,
+            "symbol": pair, "tag": pair_to_tag(pair), "price": current_price,
+            "change_24h": change_24h, "trend": trend, "rsi": rsi,
+            "volume_percent": vol_ratio * 100, "volume_delta": (vol_ratio - 1) * 100,
+            "volume_status": "HIGH 🟢" if vol_ratio > 1.2 else "NORMAL ⚪"
         }
-        # FIFO Cache Purge
-        if len(_MARKET_SNAPSHOT_CACHE) >= 100:
-            oldest_key = next(iter(_MARKET_SNAPSHOT_CACHE))
-            _MARKET_SNAPSHOT_CACHE.pop(oldest_key)
-
-        _MARKET_SNAPSHOT_CACHE[symbol] = (res, datetime.now())
+        _MARKET_SNAPSHOT_CACHE[symbol] = (res, now)
         return res
 
 
 def calculate_market_pulse(snapshots, config):
     score = 50
-    bullish_count = 0
-    bearish_count = 0
-
-    for snapshot in snapshots:
-        if snapshot is None:
-            continue
-        if "BULLISH" in snapshot["trend"]:
-            score += 8
-            bullish_count += 1
-        else:
-            # Bearish trend is heavily weighted during crashes
-            score -= 12
-            bearish_count += 1
-
-        if snapshot["rsi"] >= 65:
-            score += 5
-        elif snapshot["rsi"] <= 35:
-            # Low RSI (Fear) gets higher penalty
-            score -= 10
-
-        if snapshot["change_24h"] >= 2:
-            score += 4
-        elif snapshot["change_24h"] <= -2:
-            score -= 6
-
+    bulls, bears = 0, 0
+    for s in snapshots:
+        if not s: continue
+        if "BULLISH" in s["trend"]: score += 8; bulls += 1
+        else: score -= 12; bears += 1
+        if s["rsi"] >= 65: score += 5
+        elif s["rsi"] <= 35: score -= 10
+        if s["change_24h"] >= 2: score += 4
+        elif s["change_24h"] <= -2: score -= 6
     powell_score = int(config["powell"]["score"])
     score += (3 - powell_score) * 4
-
-    etf_bias = config["etf"]["bias"]
-    if etf_bias == "bullish":
-        score += 10
-    elif etf_bias == "bearish":
-        score -= 10
-
+    if config["etf"]["bias"] == "bullish": score += 10
+    elif config["etf"]["bias"] == "bearish": score -= 10
     score = max(0, min(100, score))
-    if score <= 25:
-        label = "EXTREME FEAR"
-    elif score <= 40:
-        label = "FEAR"
-    elif score <= 60:
-        label = "NEUTRAL"
-    elif score <= 75:
-        label = "GREED"
-    else:
-        label = "EXTREME GREED"
-
-    # Dynamic "Watch Next" Logic
-    if bullish_count > bearish_count:
-        if score > 75:
-            watch_next = "Watch for potential overextension. Bulls are in control, but profit-taking risk is high."
-        else:
-            watch_next = "Watch for trend continuation. Strong breadth suggests a stable upward trajectory."
-    elif bearish_count > bullish_count:
-        if score < 25:
-            watch_next = "Watch for a capitulation bounce. Extreme fear often leads to local reversals."
-        else:
-            watch_next = "Watch for lower lows. Bearish trend structure remains dominant."
-    else:
-        watch_next = "Watch for a decisive breakout. Market is compressed and searching for direction."
-
+    label = "EXTREME FEAR" if score <= 25 else "FEAR" if score <= 40 else "NEUTRAL" if score <= 60 else "GREED" if score <= 75 else "EXTREME GREED"
+    watch_next = "Watch for potential overextension." if score > 75 else "Watch for capitulation bounce." if score < 25 else "Watch for trend continuation."
     return {"score": score, "label": label, "watch_next": watch_next}
 
 
-def summarize_market_logic(snapshots, pulse):
-    """Manual fallback market summary."""
-    bulls = [s for s in snapshots if s and "BULLISH" in s["trend"]]
-    bears = [s for s in snapshots if s and "BEARISH" in s["trend"]]
-    oversold = [s for s in snapshots if s and s["rsi"] < 35]
-
-    if len(bulls) >= 2:
-        return "Market is showing resilient bullish structure across majors, though volume remains thin."
-    if len(bears) >= 2:
-        if oversold:
-            return f"Heavily bearish momentum, however {oversold[0]['tag']} is approaching oversold territory."
-        return "Broad bearish momentum persists. Institutional flows remain cautious."
-    return "Market is currently in an accumulation phase with mixed signals across the board."
-
-
-GEMINI_MODELS = ["gemini-2.0-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-pro"]
-
+GEMINI_MODELS = ["gemini-2.0-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"]
 
 async def call_gemini_rest(session, prompt):
-    """Calls Gemini REST API via aiohttp with key rotation and model failover."""
-    if not gemini_rotator.has_keys():
-        return None
-
-    # Try up to N times where N is number of keys
+    if not gemini_rotator.has_keys(): return None
     for _ in range(len(gemini_rotator.get_all_keys())):
-        reserved_index, key = await gemini_rotator.reserve_key()
-        if not key:
-            return None
-
-        for model_name in GEMINI_MODELS:
-            url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={key}"
-            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        idx, key = await gemini_rotator.reserve_key()
+        if not key: return None
+        for model in GEMINI_MODELS:
+            url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={key}"
             try:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                async with session.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        candidates = data.get("candidates", [])
-                        if candidates and "content" in candidates[0]:
-                            text = candidates[0]["content"].get("parts", [{}])[0].get("text", "")
-                            if text:
-                                return text.strip()
-                        else:
-                            print(f"⚠️ Gemini Safety Filter Block or empty response: {data}")
-                            continue
-                    elif resp.status == 404:
-                        # Model not supported by this key or region, try next model
-                        continue
-                    elif resp.status == 429:
-                        print("ℹ️ Gemini Key 429 (Rate Limit). Rotating...")
-                        await gemini_rotator.advance_after_rate_limit(reserved_index)
-                        break  # Try the next key
-                    else:
-                        error_body = await resp.text()
-                        print(f"❌ Gemini API error ({resp.status}): {error_body[:100]}")
-                        # Other errors (500, etc) might be temporary, try next model or next key
-                        continue
-            except Exception as e:
-                print(f"❌ Gemini call error: {e}")
-                continue
-
+                        return data['candidates'][0]['content']['parts'][0]['text'].strip()
+                    if resp.status == 429:
+                        await gemini_rotator.advance_after_rate_limit(idx)
+                        break
+            except: continue
     return None
-
 
 async def call_groq_rest(session, prompt):
-    """Calls Groq REST API (High-speed Backup) via aiohttp with rotation."""
-    if not groq_rotator.has_keys():
-        return None
-
-    # Try all keys
+    if not groq_rotator.has_keys(): return None
     for _ in range(len(groq_rotator.get_all_keys())):
-        reserved_index, key = await groq_rotator.reserve_key()
-        if not key:
-            continue
-
+        idx, key = await groq_rotator.reserve_key()
+        if not key: continue
         url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-        payload = {
-            "model": "llama-3.3-70b-versatile",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7,
-            "max_tokens": 512,
-        }
+        headers = {"Authorization": f"Bearer {key}"}
+        payload = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}]}
         try:
-            async with session.post(
-                url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
+            async with session.post(url, json=payload, headers=headers, timeout=15) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                    if text:
-                        print("✅ Groq AI success (Llama 3.3).")
-                        return text.strip()
-                elif resp.status == 429:
-                    print("⚠️ Groq Key 429 (Rate Limit). Rotating...")
-                    await groq_rotator.advance_after_rate_limit(reserved_index)
+                    return data['choices'][0]['message']['content'].strip()
+                if resp.status == 429:
+                    await groq_rotator.advance_after_rate_limit(idx)
                     continue
-                else:
-                    body = await resp.text()
-                    print(f"❌ Groq API error ({resp.status}): {body[:100]}")
-        except Exception as e:
-            print(f"❌ Groq REST call failed: {e}")
+        except: continue
     return None
 
-
 async def get_ai_market_summary(session, snapshots, pulse):
-    """Generates a professional AI market summary with Gemini -> Groq failover and caching."""
-    # Create a unique key based on the coins and their prices (rounded to prevent minor jitter)
     cache_key = "|".join([f"{s['tag']}:{round(s['price'], 2)}" for s in snapshots if s])
-
     async with _AI_CACHE_LOCK:
         if cache_key in _AI_SUMMARY_CACHE:
-            # Check if cache is still fresh (within 10 minutes)
-            cached_val, timestamp = _AI_SUMMARY_CACHE[cache_key]
-            if (datetime.now() - timestamp).total_seconds() < 600:
-                return cached_val
-
-        if not gemini_rotator.has_keys() and not groq_rotator.has_keys():
-            return summarize_market_logic(snapshots, pulse)
-
-        coin_info = []
-        for s in snapshots:
-            if s:
-                coin_info.append(
-                    f"  #{s['tag']}: ${s['price']:,.2f} "
-                    f"({s['change_24h']:+.2f}% 24h, Trend: {s['trend']}, RSI: {s['rsi']:.1f})"
-                )
-
-        context = "\n".join(coin_info)
-        prompt = (
-            f"Act as a professional Crypto Market Analyst. Summarize the following 24h market data into 2-3 precise, "
-            f"insightful sentences for a high-level trading digest. Focus on trend confluence and momentum.\n\n"
-            f"Market Pulse Score: {pulse['score']}/100 ({pulse['label']})\n"
-            f"24h Snapshots:\n{context}\n\n"
-            f"Output only the summary text."
-        )
-
-        # Attempt 1: Gemini (with rotation)
-        result = await call_gemini_rest(session, prompt)
-        if result:
-            # FIFO Cache Purge
-            if len(_AI_SUMMARY_CACHE) >= 100:
-                oldest_key = next(iter(_AI_SUMMARY_CACHE))
-                _AI_SUMMARY_CACHE.pop(oldest_key)
-            _AI_SUMMARY_CACHE[cache_key] = (result, datetime.now())
-            return result
-
-        # Attempt 2: Groq (Failover)
-        print("🔄 Gemini failed/exhausted. Switching to Groq Backup Brain...")
-        groq_result = await call_groq_rest(session, prompt)
-        if groq_result:
-            # FIFO Cache Purge
-            if len(_AI_SUMMARY_CACHE) >= 100:
-                oldest_key = next(iter(_AI_SUMMARY_CACHE))
-                _AI_SUMMARY_CACHE.pop(oldest_key)
-            _AI_SUMMARY_CACHE[cache_key] = (groq_result, datetime.now())
-            return groq_result
-
-        # Final Fallback: Manual
-        print("🤖 All AI Layers failed. Falling back to manual logic.")
-        final_result = summarize_market_logic(snapshots, pulse)
-
-        # Cache manual fallback too
-        if len(_AI_SUMMARY_CACHE) >= 100:
-            oldest_key = next(iter(_AI_SUMMARY_CACHE))
-            _AI_SUMMARY_CACHE.pop(oldest_key)
-        _AI_SUMMARY_CACHE[cache_key] = (final_result, datetime.now())
-
-        return final_result
-
-
-async def build_digest_message(
-    session,
-    snapshots,
-    pulse,
-    config,
-    top_news=None,
-    upcoming_macro=None,
-    liq_stats=None,
-    macro_partial_failure=False,
-    user_tier="free",
-):
-    lines = [
-        "📰 <b>DAILY MARKET DIGEST</b>",
-        f"Time: {html_safe(ist_now())}",
-        "",
-        f"<b>Market Pulse:</b> {pulse['label']} ({pulse['score']}/100)",
-    ]
-
-    # 24h Stance Timeout (Powell update)
-    powell = config.get("powell", {})
-    last_updated_str = powell.get("updated_at")
-    show_powell = False
-    if last_updated_str:
-        try:
-            last_ts = datetime.fromisoformat(last_updated_str).timestamp()
-            if (utc_now().timestamp() - last_ts) < 86400:  # 24 hours
-                show_powell = True
-        except Exception:
-            pass
-
-    if show_powell:
-        lines.append(
-            "<b>Why it matters:</b> "
-            f"{html_safe(config['powell']['stance'].title())} Fed tone and current "
-            "trend breadth are shaping risk appetite."
-        )
-    else:
-        lines.append(
-            "<b>Review:</b> Neutral Fed baseline. Market trend breadth and macro inflows are shaping risk appetite."
-        )
-
-    lines.append(f"<b>Watch next:</b> {html_safe(pulse['watch_next'])}")
-    lines.append("")
-
-    # 24h Liquidation Section
-    if liq_stats:
-        total = liq_stats["total"]
-        if total > 0:
-            long_p = (liq_stats["longs"] / total) * 100
-            short_p = (liq_stats["shorts"] / total) * 100
-            composition = f"{long_p:.1f}% Longs | {short_p:.1f}% Shorts"
-        else:
-            composition = "0% Longs | 0% Shorts"
-
-        liq_cfg = config.get("liquidation_settings", DEFAULT_CONFIG["liquidation_settings"])
-        status = "NORMAL ⚪"
-        if total >= liq_cfg["extreme"]:
-            status = "EXTREME 🔴"
-        elif total >= liq_cfg["high"]:
-            status = "HIGH 🟠"
-
-        lines.append("<b>24h Liquidations</b>")
-        lines.append(f"- Total: ${total:,.0f} [{status}]")
-        lines.append(f"- Longs: ${liq_stats['longs']:,.0f} | Shorts: ${liq_stats['shorts']:,.0f}")
-        lines.append(f"- Composition: {composition}")
-        lines.append("")
-
-    lines.append("<b>Major Coin Snapshot</b>")
-    for snapshot in snapshots:
-        if snapshot is None:
-            continue
-
-        emoji = "🔼" if snapshot["change_24h"] >= 0 else "🔽"
-        lines.append(
-            f"<b>  #{html_safe(snapshot['tag'])}</b>: ${snapshot['price']:,.2f} "
-            f"({emoji} {snapshot['change_24h']:+.2f}% 24h)"
-        )
-        lines.append(f"- Trend: {snapshot['trend']} vs 50-day average")
-        lines.append(f"- Daily RSI: {snapshot['rsi']:.1f}")
-        lines.append(
-            f"- Volume: {html_safe(snapshot['volume_status'])} "
-            f"({snapshot['volume_delta']:+.1f}% vs 20-day avg)"
-        )
-        lines.append("")
-
-    # News section
-    lines.append("📰 <b>Top News (Last 24h)</b>")
-    if top_news:
-        for item in top_news:
-            lines.append(f"{item['emoji']} <b>{item['level']}:</b> {html_safe(item['title'])}")
-    else:
-        lines.append("- No major news events recorded in last 24h.")
-    lines.append("")
-
-    # Market Summary section
-    summary = await get_ai_market_summary(session, snapshots, pulse)
-    lines.append("📊 <b>Market Summary</b>")
-    lines.append(f"{html_safe(summary)}")
-    lines.append("")
-
-    lines.append("---")
-    lines.append("(Data Sources: Binance, Trading Economics, CoinTelegraph, CoinGlass)")
-    lines.append("")
-    lines.append("⚠️ <b>Disclaimer:</b> Market analysis only, not financial advice.")
-    lines.append("")
-
-    if user_tier == "pro":
-        lines.append("💎 <b>Intelligence Tier Active</b>")
-        lines.append("You are receiving full signal confluence rationale and professional focus notes.")
-    else:
-        lines.append("💡 <b>Free Tier Active</b>")
-        lines.append("Upgrade to <b>PRO</b> for full intelligence signals and confluence breakdowns.")
-        lines.append("/upgrade")
-
-    return "\n".join(lines).strip()
-
-
-async def fetch_top_news(session):
-    """
-    Fetch headlines from the last 24 hours via CoinTelegraph RSS.
-    Priority: Critical/High Importance events.
-    Fallback: General headlines if no high-impact news exists.
-    """
-    try:
-        url = "https://cointelegraph.com/rss"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with session.get(url, headers=headers, timeout=10) as response:
-            if response.status != 200:
-                return []
-            xml_data = await response.text()
-
-            root = ET.fromstring(xml_data)
-            channel = root.find("channel")
-            if channel is None:
-                return []
-
-            cutoff = utc_now().timestamp() - 86400  # 24 hours ago
-            critical_high = []
-            general = []
-
-            for item in channel.findall("item")[:40]:
-                pubDate = item.find("pubDate")
-                if pubDate is None:
-                    continue
-
-                try:
-                    dt = parsedate_to_datetime(pubDate.text)
-                    published_on = dt.timestamp()
-                except Exception:
-                    continue
-
-                if published_on < cutoff:
-                    continue
-
-                title = item.find("title")
-                title_text = title.text if title is not None else ""
-
-                importance_data = classify_news_importance(title_text)
-                news_item = {
-                    "title": title_text,
-                    "source": "CoinTelegraph",
-                    "level": importance_data["level"],
-                    "emoji": importance_data["emoji"],
-                    "impact": importance_data["impact"],
-                }
-
-                if importance_data["level"] in ("CRITICAL", "MODERATE"):
-                    critical_high.append(news_item)
-                else:
-                    general.append(news_item)
-
-                if len(critical_high) >= 3:
-                    break
-
-            # Sort top news by severity (CRITICAL first)
-            # Use numeric ranking to avoid alphabetical sorting issues (M > C)
-            SEVERITY_RANK = {"CRITICAL": 3, "MODERATE": 2, "LOW": 1}
-            final_news = sorted(
-                critical_high + general[:3], key=lambda x: SEVERITY_RANK.get(x["level"], 0), reverse=True
-            )
-            return final_news[:3]  # Strictly Top 3 news items
-    except Exception as exc:
-        print(f"fetch_top_news error: {exc}")
-        return []
-
-
-async def _fetch_investing_macro_events(session, timeframe_tab):
-    """
-    Fetches high-impact macro events from Investing.com via internal AJAX API.
-    Bypasses the broken ForexFactory Next Week feed.
-    """
-    try:
-        pass
-    except ImportError:
-        print("   - ❌ Error: BeautifulSoup4 not installed. Cannot fetch Investing.com data.")
-        return False, []
-
-    url = "https://www.investing.com/economic-calendar/Service/getCalendarFilteredData"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "X-Requested-With": "XMLHttpRequest",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    }
-    # US(5), EU(72), UK(4), Ger(17), Jpn(35), Aus(25), Can(6), Swz(12), NZ(43)
-    payload = (
-        "country[]=5&country[]=72&country[]=4&country[]=17&country[]=35&country[]=25&country[]=6&country[]=12"
-        "&country[]=43&timeZone=8&timeFilter=timeOnly&currentTab={timeframe_tab}&submitFilters=1&limit_from=0"
-        "&importance=3"
-    ).format(timeframe_tab=timeframe_tab)
-
-    events = []
-    print(f"📡 Macro Fetch: Checking {timeframe_tab} via Investing.com API...")
-    try:
-        async with session.post(url, headers=headers, data=payload, timeout=15) as resp:
-            content_type = resp.headers.get("Content-Type", "").lower()
-            print(f"   - Status: {resp.status} | Content-Type: {content_type}")
-
-            if resp.status != 200:
-                print(f"   - ❌ Error: Investing API returned non-200 status ({resp.status}).")
-                return False, []
-
-            raw_text = await resp.text()
-            html = ""
-            try:
-                data = json.loads(raw_text)
-                html = data.get("data", "")
-            except Exception:
-                # If it's not JSON, might be raw HTML (which we can still attempt to parse)
-                html = raw_text
-
-            if not html or len(html.strip()) < 50:
-                print("   - ❌ Error: Investing API returned empty or too short response.")
-                return False, []
-
-            soup = BeautifulSoup(html, "html.parser")
-
-            # 1. Look for the actual row markers to confirm it's a real calendar
-            rows = soup.find_all("tr", class_="js-event-item")
-            if not rows:
-                # Check for "No Results" specifically
-                if "No Events Scheduled" in html or "noResults" in html:
-                    print("   - ✅ Success: Calendar loaded, but truly no events scheduled.")
-                    return True, []
-                print("   - ❌ Error: Calendar structure markers (js-event-item) not found. Blocked or format change?")
-                return False, []
-
-            print(f"   - Status: Found {len(rows)} raw calendar rows. Filtering for High Impact...")
-
-            for tr in rows:
-                try:
-                    datetime_str = tr.get("data-event-datetime")  # e.g., "2026/04/10 15:30:00"
-                    if not datetime_str:
-                        continue
-
-                    title_elem = tr.find("td", class_="event")
-                    title = title_elem.text.strip() if title_elem else "Unknown"
-                    title = title.replace("  ", " ").strip()
-
-                    country_td = tr.find("td", class_="flagCur")
-                    country = country_td.text.replace("\xa0", "").strip() if country_td else ""
-                    if len(country) > 3:
-                        country = country[-3:]  # Extract currency ISO
-
-                    sentiment_td = tr.find("td", class_="sentiment")
-                    if sentiment_td and sentiment_td.get("data-img_key") == "bull3":
-                        dt = datetime.strptime(datetime_str, "%Y/%m/%d %H:%M:%S")
-                        event_ts = int(dt.replace(tzinfo=timezone.utc).timestamp())
-
-                        events.append(
-                            {
-                                "title": title,
-                                "country": country,
-                                "date": dt.strftime("%m-%d"),
-                                "time": dt.strftime("%H:%M UTC"),
-                                "timestamp": event_ts,
-                            }
-                        )
-                except Exception:
-                    continue
-
-        print(f"   - ✅ Success: Extracted {len(events)} High-Impact events from Investing.com.")
-        return True, events
-    except Exception as e:
-        print(f"   - ❌ Investing Fetch Error: {e}")
-        return False, []
-
-
-async def _fetch_all_high_impact_events(session, horizon_days=1):
-    """
-    Consolidated helper to fetch High Impact events from both current and next week.
-    Handles primary/fallback URLs, detailed logging, and success/failure signaling.
-    """
-    now_ts = utc_now().timestamp()
-    limit_ts = now_ts + (86400 * horizon_days)
-    all_events = []
-    seen_titles = set()
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    # We only use ForexFactory for the current week, as they removed nextweek support.
-    feed_targets = [
-        {
-            "label": "This Week",
-            "primaries": ["https://nfs.faireconomy.media/ff_calendar_thisweek.xml"],
-            "fallbacks": ["https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.xml"],
-        }
-    ]
-
-    total_successful_feeds = 0
-    # total_attempted_feeds = len(feed_targets)
-    target_status = {}
-
-    for target in feed_targets:
-        feed_success = False
-        target_event_count = 0
-        for url in target["primaries"] + target.get("fallbacks", []):
-            print(f"📡 Macro Fetch: Checking {target['label']} via {url}...")
-            try:
-                async with session.get(url, headers=headers, timeout=10) as response:
-                    content_type = response.headers.get("Content-Type", "").lower()
-                    print(f"   - Status: {response.status} | Content-Type: {content_type}")
-
-                    if response.status != 200:
-                        continue
-
-                    if "xml" not in content_type:
-                        print(f"   - ⚠️ Warning: Expected XML but got {content_type}. Skipping.")
-                        continue
-
-                    xml_data = await response.text()
-                    if not xml_data.strip().startswith("<?xml") and not xml_data.strip().startswith("<weeklyevents"):
-                        print("   - ⚠️ Warning: Invalid XML body. Skipping.")
-                        continue
-
-                    root = ET.fromstring(xml_data)
-                    events_in_this_feed = 0
-
-                    for item in root.findall("event"):
-                        impact_node = item.find("impact")
-                        if impact_node is None or impact_node.text.strip() != "High":
-                            continue
-
-                        title_node = item.find("title")
-                        country_node = item.find("country")
-                        date_node = item.find("date")
-                        time_node = item.find("time")
-
-                        if any(n is None or n.text is None for n in (title_node, country_node, date_node, time_node)):
-                            continue
-
-                        dt_str = f"{date_node.text.strip()} {time_node.text.strip()}"
-                        try:
-                            event_dt = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p").replace(tzinfo=timezone.utc)
-                            event_ts = event_dt.timestamp()
-                        except Exception:
-                            continue  # Skip malformed dates
-
-                        unique_id = f"{title_node.text.strip()}_{event_ts}"
-
-                        if now_ts <= event_ts <= limit_ts and unique_id not in seen_titles:
-                            all_events.append(
-                                {
-                                    "title": title_node.text.strip(),
-                                    "country": country_node.text.strip(),
-                                    "date": event_dt.strftime("%m-%d"),
-                                    "time": event_dt.strftime("%H:%M UTC"),
-                                    "timestamp": event_ts,
-                                }
-                            )
-                            seen_titles.add(unique_id)
-                            events_in_this_feed += 1
-                            target_event_count += 1
-
-                    if events_in_this_feed > 0:
-                        print(f"   - ✅ Success: Extracted {events_in_this_feed} unique High-Impact events.")
-                    else:
-                        print("   - 💡 Note: No future High-Impact events found (Weekend Rollover Mode).")
-
-                    feed_success = True
-                    total_successful_feeds += 1
-                    break
-            except Exception as e:
-                print(f"   - ❌ Error: {e}")
-                continue
-
-        if not feed_success:
-            print(f"   - {target['label']} feed unavailable after primary/fallback attempts.")
-        target_status[target["label"]] = {
-            "ok": feed_success,
-            "count": target_event_count,
-        }
-
-    # --- Next Week Injection via Investing.com ---
-    # Fetch Next Week data exclusively from Investing.com if requested
-    investing_success = False
-    investing_count = 0
-    if horizon_days > 1:
-        success, investing_events = await _fetch_investing_macro_events(session, "nextWeek")
-        if success:
-            investing_success = True
-            for ev in investing_events:
-                unique_id = f"{ev['title']}_{ev['timestamp']}"
-                if now_ts <= ev["timestamp"] <= limit_ts and unique_id not in seen_titles:
-                    all_events.append(ev)
-                    seen_titles.add(unique_id)
-                    investing_count += 1
-
-        target_status["Next Week"] = {
-            "ok": investing_success,
-            "count": investing_count,
-        }
-
-    this_week_ok = target_status.get("This Week", {}).get("ok", False)
-    next_week_ok = target_status.get("Next Week", {}).get("ok", False)
-    this_week_count = target_status.get("This Week", {}).get("count", 0)
-    next_week_count = target_status.get("Next Week", {}).get("count", 0)
-
-    if horizon_days > 1:
-        # For weekly reports, we need both This Week (FF) and Next Week (Investing) to be OK
-        partial_failure = (this_week_ok or next_week_ok) and not (this_week_ok and next_week_ok)
-        total_success = this_week_ok and next_week_ok
-    else:
-        # For daily reports, we usually only care about the This Week feed
-        partial_failure = not this_week_ok
-        total_success = this_week_ok
-
-    print(
-        "📊 Macro Fetch Summary: "
-        f"this_week_ok={this_week_ok} count={this_week_count} | "
-        f"next_week_ok={next_week_ok} count={next_week_count} | "
-        f"partial_failure={partial_failure} | total_events={len(all_events)}"
-    )
-
-    return {
-        "success": total_success,
-        "partial_failure": partial_failure,
-        "this_week_ok": this_week_ok,
-        "next_week_ok": next_week_ok,
-        "events": sorted(all_events, key=lambda x: x["timestamp"]),
-    }
-
-
-async def fetch_macro_events(session):
-    """Fetch high-impact economic events for the next 24 hours (Daily Digest)."""
-    return await _fetch_all_high_impact_events(session, horizon_days=1)
-
-
-async def fetch_weekly_macro_events(session):
-    """Fetch high-impact economic events for the next 7 days (Admin Audit)."""
-    return await _fetch_all_high_impact_events(session, horizon_days=7)
+            val, ts = _AI_SUMMARY_CACHE[cache_key]
+            if (datetime.now() - ts).total_seconds() < 600: return val
+        prompt = f"Summarize market data: Pulse {pulse['score']}, Data: {snapshots}. 2 sentences max."
+        res = await call_gemini_rest(session, prompt) or await call_groq_rest(session, prompt) or "Market is in accumulation phase."
+        _AI_SUMMARY_CACHE[cache_key] = (res, datetime.now())
+        return res
+
+async def build_digest_message(session, snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None, macro_partial_failure=False, user_tier="free"):
+    lines = ["<b>DAILY MARKET DIGEST</b>", f"Pulse: {pulse['label']} ({pulse['score']}/100)", f"Watch: {pulse['watch_next']}", ""]
+    for s in snapshots:
+        if s: lines.append(f"#{s['tag']}: ${s['price']:,.2f} ({s['change_24h']:+.2f}%)")
+    lines.append(f"\nSummary: {await get_ai_market_summary(session, snapshots, pulse)}")
+    return "\n".join(lines)
 
 
 def format_user_label(user_row):
@@ -1458,7 +824,7 @@ async def send_daily_digest(session, target_date_str, mark_as_sent=True, target_
 
     # 1. Fetch shared context (Macro, Liq, News) to reuse across users
     top_news = await fetch_top_news(session)
-    macro_data = await fetch_macro_events(session)
+    macro_data = await fetch_macro_events(session, horizon_days=1)
     upcoming_macro = macro_data["events"] if macro_data.get("events") else []
     cutoff_iso = (utc_now() - timedelta(hours=24)).isoformat()
     liq_stats = await asyncio.to_thread(database.get_24h_liquidation_stats, cutoff_iso)
@@ -2022,40 +1388,23 @@ async def handle_admin_command(session, command, args, chat_id):
         return
 
     if command == "/macro":
-        result = await fetch_weekly_macro_events(session)
+        result = await fetch_macro_events(session, horizon_days=7)
         events = result.get("events", [])
-        this_week_ok = result.get("this_week_ok", False)
-        next_week_ok = result.get("next_week_ok", False)
-        partial_failure = result.get("partial_failure", False)
 
-        # Case 1: Both sources failed AND no events at all
-        if not this_week_ok and not next_week_ok and not events:
+        # Case 1: Fetch failed AND no events at all
+        if not result["success"] and not events:
             await send_telegram_message(
                 session, chat_id, "⚠️ Macro calendar feed unavailable right now. Please try again later."
             )
             return
 
-        # Case 2: Both sources succeeded but truly no events
-        if this_week_ok and next_week_ok and not events:
+        # Case 2: Fetch succeeded but truly no events
+        if result["success"] and not events:
             await send_telegram_message(session, chat_id, "📅 No High Impact macro events found for the next 7 days.")
             return
 
-        # Case 3: No events but partial failure (one source down)
-        if not events and partial_failure:
-            source_down = "Current-week" if not this_week_ok else "Next-week"
-            await send_telegram_message(
-                session,
-                chat_id,
-                f"⚠️ {source_down} macro source unavailable right now. "
-                "No events from the working source either. Try again later.",
-            )
-            return
-
-        # Case 4: Events exist — always show them, with warning if partial failure
+        # Case 4: Events exist
         lines = ["<b>📅 WEEKLY MACRO AUDIT (High Impact)</b>", ""]
-        if partial_failure:
-            source_down = "Current-week" if not this_week_ok else "Next-week"
-            lines.insert(0, f"⚠️ {source_down} macro source partially unavailable. Showing available events.\n")
         for e in events:
             lines.append(f"• <code>{e['date']} {e['time']}</code>")
             lines.append(f"  <b>{html_safe(e['title'])}</b> ({e['country']})")
@@ -2274,7 +1623,7 @@ async def macro_calendar_loop(session):
 
     while True:
         try:
-            result = await fetch_macro_events(session)
+            result = await fetch_macro_events(session, horizon_days=1)
             if not result["success"]:
                 # Silent skip to avoid log spam, fetcher already prints errors
                 await asyncio.sleep(3600)  # Wait longer if feed is down

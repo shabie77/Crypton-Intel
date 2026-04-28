@@ -54,11 +54,13 @@ if not gemini_rotator.has_keys() and not groq_rotator.has_keys():
     print("⚠️ AI API Keys missing. Bot will use manual market summary logic.")
 
 RSI_STATE_FILE = os.getenv("RSI_STATE_FILE", os.path.join(DATA_DIR, "rsi_state.json"))
+LIFECYCLE_STATE_FILE = os.getenv("LIFECYCLE_STATE_FILE", os.path.join(DATA_DIR, "lifecycle_state.json"))
 LAST_DIGEST_FILE = os.getenv("LAST_DIGEST_FILE", os.path.join(DATA_DIR, "last_digest.txt"))
 CONFIG_FILE = os.getenv("CONFIG_FILE", os.path.join(DATA_DIR, "config.json"))
 STARTED_AT = datetime.now(timezone.utc)
 CONFIG_LOCK = asyncio.Lock()
 RSI_STATE_LOCK = asyncio.Lock()
+LIFECYCLE_STATE_LOCK = asyncio.Lock()
 BROADCAST_SEMAPHORE = asyncio.Semaphore(25)  # Global rate limit (Telegram threshold 30/s)
 DISPATCH_SEMAPHORE = asyncio.Semaphore(1)     # Serialize signal dispatches to prevent 429 storms
 
@@ -227,6 +229,33 @@ async def save_rsi_state(state):
             await asyncio.to_thread(write_json_file, RSI_STATE_FILE, state)
         except Exception as exc:
             logger.error(f"Error saving RSI state: {exc}")
+
+
+def load_lifecycle_state():
+    """Loads lifecycle state from disk, converting ISO strings back to datetime."""
+    raw = read_json_file(LIFECYCLE_STATE_FILE, {})
+    for sym, data in raw.items():
+        if "last_updated" in data and data["last_updated"]:
+            try:
+                data["last_updated"] = datetime.fromisoformat(data["last_updated"])
+            except Exception:
+                data["last_updated"] = None
+    return raw
+
+
+async def save_lifecycle_state(state):
+    """Saves lifecycle state to disk, converting datetimes to ISO strings."""
+    serializable = {}
+    for sym, data in state.items():
+        serializable[sym] = data.copy()
+        if isinstance(data.get("last_updated"), datetime):
+            serializable[sym]["last_updated"] = data["last_updated"].isoformat()
+    
+    async with LIFECYCLE_STATE_LOCK:
+        try:
+            await asyncio.to_thread(write_json_file, LIFECYCLE_STATE_FILE, serializable)
+        except Exception as exc:
+            logger.error(f"Error saving lifecycle state: {exc}")
 
 
 
@@ -680,6 +709,12 @@ def evaluate_signal_lifecycle(symbol: str, price: float, rsi: float,
         elif zone == "RESISTANCE" and price > (levels["resistance"] + atr_buffer):
             new_state = "INVALIDATED"
             zone = None
+        elif not zone:
+            # DRIFT LOGIC: If price drifts > 5% away from level, reset to NEUTRAL
+            dist_support = abs(price - levels["support"]) / levels["support"]
+            dist_resist = abs(price - levels["resistance"]) / levels["resistance"]
+            if dist_support > 0.05 and dist_resist > 0.05:
+                new_state = "NEUTRAL"
 
     # Cooldown: don't re-enter WATCH within 6 hours
     if new_state == "WATCH" and prev_state == "WATCH":
@@ -705,6 +740,7 @@ def evaluate_signal_lifecycle(symbol: str, price: float, rsi: float,
 async def send_invalidation_notice(session, symbol: str, support: float, resistance: float):
     """
     Sends invalidation notification to Pro users when a signal breaks.
+    Uses concurrent dispatch with rate-limit protection.
     """
     msg = (
         f"⚠️ <b>{symbol} Signal Invalidated</b>\n\n"
@@ -715,11 +751,16 @@ async def send_invalidation_notice(session, symbol: str, support: float, resista
         f"<i>Market analysis only. Not financial advice.</i>"
     )
     users_with_tiers = await asyncio.to_thread(database.get_all_users_with_tiers)
+    
+    tasks = []
     for row in users_with_tiers:
         uid, tier = row[0], row[2]
         if tier == "pro":
-            await send_telegram_message_semaphore(session, uid, msg)
-    await asyncio.sleep(0.1)
+            tasks.append(send_telegram_message_semaphore(session, uid, msg))
+    
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+        print(f"📡 Invalidation notice for {symbol} sent to {len(tasks)} Pro users.")
 
 
 # ---------------------------------------------------------------------------
@@ -1407,6 +1448,8 @@ async def rsi_scanner_loop(session):
 
                             state["state"] = current_state
                             await asyncio.to_thread(save_rsi_state, rsi_state_tracker)
+                            # Persist lifecycle state to disk
+                            await save_lifecycle_state(active_signal_states)
                 except Exception as coin_exc:
                     print(f"⚠️ Error processing coin {symbol}: {coin_exc}")
                     continue

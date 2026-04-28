@@ -60,8 +60,28 @@ STARTED_AT = datetime.now(timezone.utc)
 CONFIG_LOCK = asyncio.Lock()
 RSI_STATE_LOCK = asyncio.Lock()
 BROADCAST_SEMAPHORE = asyncio.Semaphore(25)  # Global rate limit (Telegram threshold 30/s)
+DISPATCH_SEMAPHORE = asyncio.Semaphore(1)     # Serialize signal dispatches to prevent 429 storms
 
 database.init_db()
+_ACTIVE_TASKS = set()
+
+
+def fire_and_forget(coro):
+    """
+    Creates a background task and tracks it to prevent garbage collection.
+    Logs exceptions instead of silently swallowing them.
+    """
+    task = asyncio.create_task(coro)
+    _ACTIVE_TASKS.add(task)
+    def _done(t):
+        _ACTIVE_TASKS.discard(t)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc:
+            print(f"❌ Background task failed: {type(exc).__name__}: {exc}")
+    task.add_done_callback(_done)
+    return task
 
 DEFAULT_CONFIG = {
     "tracked_coins": ["BTC", "ETH", "SOL", "XRP", "ADA"],
@@ -124,7 +144,6 @@ def utc_to_ist(utc_time_str):
         # Example input: "09:15 UTC"
         time_part = utc_time_str.split(" ")[0]
         h, m = map(int, time_part.split(":"))
-        # Add 5h 30m
         m += 30
         h += 5 + (m // 60)
         m %= 60
@@ -312,27 +331,26 @@ async def send_telegram_message(session, chat_id, text):
     return False
 
 
+async def send_telegram_message_semaphore(session, chat_id, text):
+    """Wrapper for send_telegram_message with a global semaphore."""
+    async with BROADCAST_SEMAPHORE:
+        return await send_telegram_message(session, chat_id, text)
+
+
 async def broadcast_message(session, text, include_channels=True, include_users=True):
     sent = 0
-    sent_ids = set()
+    tasks = []
 
-    # 1. Channels (Always receive everything)
+    # 1. Channels
     if include_channels:
         channels = await asyncio.to_thread(database.get_active_channels)
         for chat_id in set(channels):
-            if chat_id in sent_ids:
-                continue
-            if await send_telegram_message(session, chat_id, text):
-                sent += 1
-                sent_ids.add(chat_id)
+            tasks.append(send_telegram_message_semaphore(session, chat_id, text))
 
-    # 2. Users (Pro Tier get filtered content)
+    # 2. Users
     if include_users:
         users = await asyncio.to_thread(database.get_active_users)
         for user_id in set(users):
-            if user_id in sent_ids:
-                continue
-
             tier = await asyncio.to_thread(database.get_user_tier, user_id)
             if tier == "pro":
                 watchlist = await asyncio.to_thread(database.get_watchlist, user_id)
@@ -340,10 +358,11 @@ async def broadcast_message(session, text, include_channels=True, include_users=
                     mention_found = any(coin.upper() in text.upper() for coin in watchlist)
                     if not mention_found:
                         continue
+            tasks.append(send_telegram_message_semaphore(session, user_id, text))
 
-            if await send_telegram_message(session, user_id, text):
-                sent += 1
-                sent_ids.add(user_id)
+    if tasks:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        sent = sum(1 for r in results if r is True)
 
     return sent
 
@@ -351,203 +370,201 @@ async def broadcast_message(session, text, include_channels=True, include_users=
 async def dispatch_signal_alert(session, signal_result, current_price):
     """
     Dispatches a scored and threshold-passed signal alert to all active users.
-    Includes circuit breaker (abort after 50 consecutive failures).
+    Serialized via DISPATCH_SEMAPHORE to prevent 429 storms from concurrent dispatches.
     """
-    symbol = signal_result["symbol"]
-    score = signal_result["score"]
-    direction = signal_result["direction"]
-    meter = signal_result["meter"]
-    rationale = signal_result["rationale"]
-    structure = signal_result.get("structure", "WEAK")
-    micro_trend = signal_result.get("micro_trend", "WEAK")
-    macro_trend = signal_result.get("macro_trend", "BEAR")
-    rsi_raw = signal_result.get("rsi_raw", 50.0)
+    async with DISPATCH_SEMAPHORE:
+        symbol = signal_result["symbol"]
+        score = signal_result["score"]
+        direction = signal_result["direction"]
+        meter = signal_result["meter"]
+        rationale = signal_result["rationale"]
+        structure = signal_result.get("structure", "WEAK")
+        micro_trend = signal_result.get("micro_trend", "WEAK")
+        macro_trend = signal_result.get("macro_trend", "BEAR")
+        rsi_raw = signal_result.get("rsi_raw", 50.0)
+        lifecycle_state = signal_result.get("lifecycle_state", "NEUTRAL")
+        lifecycle_zone = signal_result.get("lifecycle_zone")
 
-    direction_emoji = "🟢" if direction == "LONG" else "🔴"
-    direction_label = "LONG — Oversold Setup" if direction == "LONG" else "SHORT — Overbought Setup"
+        direction_emoji = "🟢" if direction == "LONG" else "🔴"
+        direction_label = "LONG — Oversold Setup" if direction == "LONG" else "SHORT — Overbought Setup"
 
-    # 1. QUICK DECISION
-    if score >= 70:
-        decision = "✅ ACTIONABLE — levels are your guide"
-    elif score >= 55:
-        decision = "⚠️ WAIT — not fully confirmed yet"
-    else:
-        decision = "❌ WEAK — low confidence, skip this one"
-    quick_decision = f"📌 Quick Decision: {decision}"
-
-    # 2. STRENGTH DISPLAY MAPPING
-    strength_display = {
-        "HIGH CONVICTION": "High Confidence — strong setup",
-        "STRONG":          "Good Confidence — setup developing well",
-        "MODERATE":        "Medium — needs confirmation",
-        "WEAK":            "Low — early stage only"
-    }.get(signal_result["strength"], signal_result["strength"])
-
-    # 3. RATIONALE PLAIN LANGUAGE MAPPING
-    def clean_rationale(text):
-        mapping = {
-            "SMA50": "50-day average",
-            "HTF": "short-term and daily trends",
-            "delta": "pressure"
-        }
-        for k, v in mapping.items():
-            text = text.replace(k, v)
-        return text
-
-    rationale_lines = "\n".join([f"  • {html_safe(clean_rationale(r))}" for r in rationale])
-
-    # 4. MARKET STRUCTURE DISPLAY
-    structure_display = {
-        "HH_HL": "🟢 Bullish structure — higher highs and lows forming",
-        "LH_LL": "🔴 Bearish structure — lower highs and lows forming",
-        "WEAK":  "🟡 Structure unclear — no confirmed direction yet"
-    }.get(structure, "🟡 Structure unclear")
-
-    # 5. GEMINI "WHAT TO WATCH" (Pro only)
-    prompt = (
-        f"You are a crypto market assistant. Given this signal:\n"
-        f"- Asset: {symbol}\n"
-        f"- Direction: {direction}\n"
-        f"- Current Price: ${current_price}\n"
-        f"- Signal Score: {score}/100\n\n"
-        f"Output EXACTLY two lines. No explanation. No extra text.\n\n"
-        f"Line 1: Hold above $[support level] = setup strengthens\n"
-        f"Line 2: Drop below $[invalidation level] = setup fails\n\n"
-        f"Rules:\n"
-        f"- BTC → round to nearest $50\n"
-        f"- ETH/SOL → nearest $5\n"
-        f"- XRP/ADA → nearest $0.05\n\n"
-        f"⚠️ If output is not exactly 2 lines → fallback to default static levels."
-    )
-
-    try:
-        raw_res = await call_gemini_rest(session, prompt) or await call_groq_rest(session, prompt)
-        if raw_res and len(raw_res.strip().split("\n")) == 2:
-            what_to_watch = html_safe(raw_res.strip())
+        # 1. QUICK DECISION
+        if score >= 70:
+            decision = "✅ ACTIONABLE — levels are your guide"
+        elif score >= 55:
+            decision = "⚠️ WAIT — not fully confirmed yet"
         else:
-            support = current_price * 0.98 if direction == "LONG" else current_price * 1.02
-            invalid = current_price * 0.95 if direction == "LONG" else current_price * 1.05
-            what_to_watch = f"Hold above ${support:,.2f} = setup strengthens\nDrop below ${invalid:,.2f} = setup fails"
-    except Exception:
-        what_to_watch = "Monitor levels for confirmation."
+            decision = "❌ WEAK — low confidence, skip this one"
+        quick_decision = f"📌 Quick Decision: {decision}"
 
-    # 6. INSIGHT LINE
-    if score >= 76:
-        insight = "📍 Insight: Strong setup — watch your levels closely"
-    elif score >= 65:
-        insight = "📍 Insight: Developing setup — wait for confirmation"
-    else:
-        insight = "📍 Insight: Early-stage signal — wait for confirmation"
+        # 2. STRENGTH DISPLAY MAPPING
+        strength_display = {
+            "HIGH CONVICTION": "High Confidence — strong setup",
+            "STRONG":          "Good Confidence — setup developing well",
+            "MODERATE":        "Medium — needs confirmation",
+            "WEAK":            "Low — early stage only"
+        }.get(signal_result["strength"], signal_result["strength"])
 
-    # ---- PRO MESSAGE STRUCTURE ----
-    pro_msg = (
-        f"🚨 <b>{symbol} Intelligence Signal</b>\n\n"
-        f"Direction: {direction_emoji} {direction_label}\n"
-        f"Price: ${current_price:,.2f}\n"
-        f"{quick_decision}\n\n"
-        f"📊 Confidence: {meter} {score}%\n"
-        f"👉 {strength_display}\n"
-        f"Micro (4H): {structure_display}\n\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"<b>Why This Signal Fired</b>\n"
-        f"{rationale_lines}\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"<b>What to Watch</b>\n"
-        f"{what_to_watch}\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"{insight}\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"<i>Market analysis only. Not financial advice.</i>"
-    )
+        # 3. RATIONALE PLAIN LANGUAGE MAPPING
+        def clean_rationale(text):
+            mapping = {
+                "SMA50": "50-day average",
+                "HTF": "short-term and daily trends",
+                "delta": "pressure"
+            }
+            for k, v in mapping.items():
+                text = text.replace(k, v)
+            return text
 
-    # ---- FREE MESSAGE STRUCTURE (Zero Gemini) ----
-    free_summary = generate_free_summary(macro_trend, micro_trend, rsi_raw, direction)
+        rationale_lines = "\n".join([f"  • {html_safe(clean_rationale(r))}" for r in rationale])
 
-    if score >= 70:
-        action = "✅ Actionable — watch levels"
-    elif score >= 55:
-        action = "⚠️ Wait before entering"
-    else:
-        action = "❌ Skip — weak setup"
+        # 4. MARKET STRUCTURE DISPLAY
+        structure_display = {
+            "HH_HL": "🟢 Bullish structure — higher highs and lows forming",
+            "LH_LL": "🔴 Bearish structure — lower highs and lows forming",
+            "WEAK":  "🟡 Structure unclear — no confirmed direction yet"
+        }.get(structure, "🟡 Structure unclear")
 
-    free_msg = (
-        f"🚨 <b>{symbol} Signal Detected</b>\n\n"
-        f"Direction: {direction_emoji} {direction_label}\n"
-        f"Price: ${current_price:,.2f}\n\n"
-        f"📝 {html_safe(free_summary)}\n"
-        f"🎯 Action: {action}\n\n"
-        f"📊 Confidence: {meter} {score}%\n\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"💎 Want to know WHY this signal fired\n"
-        f"and the exact price levels? → /upgrade\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"<i>Market analysis only. Not financial advice.</i>"
-    )
+        # 4b. LIFECYCLE STAGE DISPLAY (Pro only)
+        stage_display = {
+            "WATCH": "👁️ WATCH — Monitoring key level",
+            "EARLY": "⚡ EARLY — Signal forming",
+            "CONFIRMED": "✅ CONFIRMED — High-confidence setup",
+            "INVALIDATED": "❌ INVALIDATED — Setup broken",
+            "NEUTRAL": "⏸️ NEUTRAL — No active setup"
+        }.get(lifecycle_state, f"⏸️ {lifecycle_state}")
 
-    # ---- DISPATCH WITH CIRCUIT BREAKER ----
-    users_with_tiers = await asyncio.to_thread(database.get_all_users_with_tiers)
-    active_channels = await asyncio.to_thread(database.get_active_channels)
+        # 5. GEMINI "WHAT TO WATCH" (Pro only)
+        prompt = (
+            f"You are a crypto market assistant. Given this signal:\n"
+            f"- Asset: {symbol}\n"
+            f"- Direction: {direction}\n"
+            f"- Current Price: ${current_price}\n"
+            f"- Signal Score: {score}/100\n\n"
+            f"Output EXACTLY two lines. No explanation. No extra text.\n\n"
+            f"Line 1: Hold above $[support level] = setup strengthens\n"
+            f"Line 2: Drop below $[invalidation level] = setup fails\n\n"
+            f"Rules:\n"
+            f"- BTC → round to nearest $50\n"
+            f"- ETH/SOL → nearest $5\n"
+            f"- XRP/ADA → nearest $0.05\n\n"
+            f"⚠️ If output is not exactly 2 lines → fallback to default static levels."
+        )
 
-    # User broadcast with circuit breaker
-    consecutive_fails = 0
-    for row in users_with_tiers:
-        uid, _username, tier = row[0], row[1], row[2]
-
-        # Watchlist filtering for Pro
-        if tier == "pro":
-            watchlist = await asyncio.to_thread(database.get_watchlist, uid)
-            if watchlist and symbol.upper() not in [c.upper() for c in watchlist]:
-                continue
-
-        msg = pro_msg if tier == "pro" else free_msg
         try:
-            success = await send_telegram_message(session, uid, msg)
-            if success:
-                consecutive_fails = 0
+            raw_res = await call_gemini_rest(session, prompt) or await call_groq_rest(session, prompt)
+            if raw_res and len(raw_res.strip().split("\n")) == 2:
+                what_to_watch = html_safe(raw_res.strip())
             else:
-                consecutive_fails += 1
-        except Exception as e:
-            consecutive_fails += 1
-            print(f"❌ dispatch_signal_alert: Failed for {uid}: {e}")
+                support = current_price * 0.98 if direction == "LONG" else current_price * 1.02
+                invalid = current_price * 0.95 if direction == "LONG" else current_price * 1.05
+                what_to_watch = f"Hold above ${support:,.2f} = setup strengthens\nDrop below ${invalid:,.2f} = setup fails"
+        except Exception:
+            what_to_watch = "Monitor levels for confirmation."
 
-        if consecutive_fails > 50:
-            print("🚨 User broadcast aborted — 50 consecutive failures. Stopping.")
-            break
+        # 6. INSIGHT LINE
+        if score >= 76:
+            insight = "📍 Insight: Strong setup — watch your levels closely"
+        elif score >= 65:
+            insight = "📍 Insight: Developing setup — wait for confirmation"
+        else:
+            insight = "📍 Insight: Early-stage signal — wait for confirmation"
 
-        await asyncio.sleep(0.05)
+        # ---- PRO MESSAGE STRUCTURE ----
+        zone_line = f"📍 Zone: Near {lifecycle_zone.lower()}\n" if lifecycle_zone else ""
+        pro_msg = (
+            f"🚨 <b>{symbol} Intelligence Signal</b>\n\n"
+            f"Direction: {direction_emoji} {direction_label}\n"
+            f"Price: ${current_price:,.2f}\n"
+            f"{quick_decision}\n\n"
+            f"📊 Confidence: {meter} {score}%\n"
+            f"👉 {strength_display}\n"
+            f"Micro (4H): {structure_display}\n"
+            f"📍 Stage: {stage_display}\n"
+            f"{zone_line}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"<b>Why This Signal Fired</b>\n"
+            f"{rationale_lines}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"<b>What to Watch</b>\n"
+            f"{what_to_watch}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"{insight}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"<i>Market analysis only. Not financial advice.</i>"
+        )
 
-    # Channel broadcast with circuit breaker
-    consecutive_fails = 0
-    for cid in active_channels:
-        try:
-            success = await send_telegram_message(session, cid, pro_msg)
-            if success:
-                consecutive_fails = 0
-            else:
-                consecutive_fails += 1
-        except Exception as e:
-            consecutive_fails += 1
-            print(f"❌ Channel dispatch failed for {cid}: {e}")
+        # ---- FREE MESSAGE STRUCTURE (Zero Gemini + State Aware) ----
+        free_summary = generate_free_summary(macro_trend, micro_trend, rsi_raw, direction, lifecycle_state, lifecycle_zone)
 
-        if consecutive_fails > 50:
-            print("🚨 Channel broadcast aborted — 50 consecutive failures. Stopping.")
-            break
+        if score >= 70:
+            action = "✅ Actionable — watch levels"
+        elif score >= 55:
+            action = "⚠️ Wait before entering"
+        else:
+            action = "❌ Skip — weak setup"
 
-        await asyncio.sleep(0.05)
+        free_msg = (
+            f"🚨 <b>{symbol} Signal Detected</b>\n\n"
+            f"Direction: {direction_emoji} {direction_label}\n"
+            f"Price: ${current_price:,.2f}\n\n"
+            f"📝 {html_safe(free_summary)}\n"
+            f"🎯 Action: {action}\n\n"
+            f"📊 Confidence: {meter} {score}%\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"💎 Want to know WHY this signal fired\n"
+            f"and the exact price levels? → /upgrade\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"<i>Market analysis only. Not financial advice.</i>"
+        )
+
+        # ---- DISPATCH WITH CONCURRENCY CONTROL ----
+        users_with_tiers = await asyncio.to_thread(database.get_all_users_with_tiers)
+        active_channels = await asyncio.to_thread(database.get_active_channels)
+
+        tasks = []
+
+        # Prepare user tasks
+        for row in users_with_tiers:
+            uid, tier = row[0], row[2]
+            if tier == "pro":
+                watchlist = await asyncio.to_thread(database.get_watchlist, uid)
+                if watchlist and symbol.upper() not in [c.upper() for c in watchlist]:
+                    continue
+            msg = pro_msg if tier == "pro" else free_msg
+            tasks.append(send_telegram_message_semaphore(session, uid, msg))
+
+        # Prepare channel tasks
+        for cid in active_channels:
+            tasks.append(send_telegram_message_semaphore(session, cid, pro_msg))
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            print(f"✅ Dispatched {symbol} signal to {len(tasks)} recipients in parallel.")
 
 
 # ---------------------------------------------------------------------------
-# Free Tier Summary (Zero Gemini)
+# Free Tier Summary (Zero Gemini + State Aware)
 # ---------------------------------------------------------------------------
 
-def generate_free_summary(macro_trend: str, micro_trend: str, rsi: float, direction: str) -> str:
+def generate_free_summary(macro_trend: str, micro_trend: str, rsi: float, direction: str,
+                          state: str = "NEUTRAL", zone: str = None) -> str:
     """
     Generates free tier signal summary using pure logic — no Gemini call.
-    Covers 8 market condition combinations.
-    macro_trend: "BULL" or "BEAR"
-    micro_trend: "BULLISH", "BEARISH", or "WEAK"
-    direction: "LONG" or "SHORT"
+    Now includes lifecycle state + zone awareness for richer context.
     """
+    # Priority 1: Lifecycle state-specific messages
+    if state == "WATCH" and zone:
+        direction_word = "bounce" if zone == "SUPPORT" else "rejection"
+        return f"Price is near key {zone.lower()}. Watch for a {direction_word}."
+    if state == "EARLY":
+        return "Early signal forming. Not confirmed yet — wait for follow-through."
+    if state == "CONFIRMED":
+        return "High-confidence setup detected. Momentum is in play."
+    if state == "INVALIDATED":
+        return "Previous setup invalidated. Market is resetting."
+
+    # Priority 2: Macro + Micro + RSI combinations
     if macro_trend == "BULL" and micro_trend == "BULLISH" and rsi <= 30:
         return "Oversold in an uptrend — early bounce conditions forming. Not confirmed yet."
     elif macro_trend == "BULL" and micro_trend == "BULLISH" and rsi >= 70:
@@ -570,6 +587,158 @@ def generate_free_summary(macro_trend: str, micro_trend: str, rsi: float, direct
         return "Overbought reading detected. Pullback possible — wait for structure to confirm."
     else:
         return "Mixed signals at this time. No high-confidence setup detected."
+
+
+# ---------------------------------------------------------------------------
+# Signal Lifecycle State Machine
+# ---------------------------------------------------------------------------
+
+active_signal_states = {}
+
+
+def calculate_key_levels(highs: list, lows: list, percentile: int = 10) -> dict:
+    """
+    Calculates support and resistance from recent 20 candles.
+    Uses percentile-based outlier filtering instead of fixed indices.
+    """
+    if len(highs) < 20 or len(lows) < 20:
+        return {"support": min(lows[-10:]) if lows else 0, "resistance": max(highs[-10:]) if highs else 0}
+    sorted_lows = sorted(lows[-20:])
+    sorted_highs = sorted(highs[-20:])
+    idx = max(1, len(sorted_lows) * percentile // 100)
+    return {
+        "support": sorted_lows[idx],
+        "resistance": sorted_highs[-(idx + 1)]
+    }
+
+
+def calculate_zone_buffer(highs: list, lows: list, closes: list, period: int = 14) -> float:
+    """
+    ATR-based dynamic zone buffer width.
+    Adapts to each asset's volatility instead of fixed 1.5%.
+    """
+    trs = []
+    for i in range(1, min(period + 1, len(closes))):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        )
+        trs.append(tr)
+    return sum(trs) / len(trs) if trs else closes[-1] * 0.015
+
+
+def evaluate_signal_lifecycle(symbol: str, price: float, rsi: float,
+                              highs: list, lows: list, closes: list) -> dict:
+    """
+    Evaluates signal lifecycle state machine for a symbol.
+    Transitions: NEUTRAL → WATCH → EARLY → CONFIRMED → INVALIDATED
+    Fast-track: NEUTRAL → CONFIRMED (if RSI extreme AND near key level)
+    """
+    levels = calculate_key_levels(highs, lows)
+    atr_buffer = calculate_zone_buffer(highs, lows, closes)
+
+    prev = active_signal_states.get(symbol, {})
+    prev_state = prev.get("state", "NEUTRAL")
+    last_updated = prev.get("last_updated")
+
+    new_state = prev_state
+    zone = None
+
+    # Determine zone using ATR buffer
+    if price <= (levels["support"] + atr_buffer):
+        zone = "SUPPORT"
+    elif price >= (levels["resistance"] - atr_buffer):
+        zone = "RESISTANCE"
+
+    # State transitions
+    if prev_state in ("NEUTRAL", "INVALIDATED"):
+        if zone and (rsi <= 30 or rsi >= 70):
+            # Fast-track: extreme RSI + near key level → skip to CONFIRMED
+            new_state = "CONFIRMED"
+        elif zone:
+            new_state = "WATCH"
+
+    elif prev_state == "WATCH":
+        if rsi <= 35 or rsi >= 65:
+            new_state = "EARLY"
+        elif not zone:
+            # Price drifted away from level — reset
+            new_state = "NEUTRAL"
+
+    elif prev_state == "EARLY":
+        if rsi <= 30 or rsi >= 70:
+            new_state = "CONFIRMED"
+        elif not zone:
+            new_state = "NEUTRAL"
+
+    elif prev_state == "CONFIRMED":
+        # Invalidation: price breaks through level by > 1 ATR
+        if zone == "SUPPORT" and price < (levels["support"] - atr_buffer):
+            new_state = "INVALIDATED"
+            zone = None
+        elif zone == "RESISTANCE" and price > (levels["resistance"] + atr_buffer):
+            new_state = "INVALIDATED"
+            zone = None
+
+    # Cooldown: don't re-enter WATCH within 6 hours
+    if new_state == "WATCH" and prev_state == "WATCH":
+        if last_updated and (datetime.now(timezone.utc) - last_updated).total_seconds() < 21600:
+            return active_signal_states[symbol]
+
+    # Update timestamp only on state change
+    if new_state != prev_state or not last_updated:
+        last_updated = datetime.now(timezone.utc)
+
+    active_signal_states[symbol] = {
+        "state": new_state,
+        "zone": zone,
+        "support": levels["support"],
+        "resistance": levels["resistance"],
+        "atr_buffer": atr_buffer,
+        "last_updated": last_updated
+    }
+
+    return active_signal_states[symbol]
+
+
+async def send_invalidation_notice(session, symbol: str, support: float, resistance: float):
+    """
+    Sends invalidation notification to Pro users when a signal breaks.
+    """
+    msg = (
+        f"⚠️ <b>{symbol} Signal Invalidated</b>\n\n"
+        f"Previous setup has been broken.\n"
+        f"Key support was ${support:,.2f} — Key resistance was ${resistance:,.2f}\n\n"
+        f"The price has moved beyond these levels, invalidating the active setup.\n"
+        f"Wait for a new signal to form.\n\n"
+        f"<i>Market analysis only. Not financial advice.</i>"
+    )
+    users_with_tiers = await asyncio.to_thread(database.get_all_users_with_tiers)
+    for row in users_with_tiers:
+        uid, tier = row[0], row[2]
+        if tier == "pro":
+            await send_telegram_message_semaphore(session, uid, msg)
+    await asyncio.sleep(0.1)
+
+
+# ---------------------------------------------------------------------------
+# Bounded Hash Cache (Anti-Spam Deduplication)
+# ---------------------------------------------------------------------------
+
+from collections import OrderedDict
+
+class BoundedHashCache(OrderedDict):
+    """Fixed-size LRU cache for message dedup hashes. Prevents memory leak."""
+    def __init__(self, max_size=5000):
+        super().__init__()
+        self.max_size = max_size
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if len(self) > self.max_size:
+            self.popitem(last=False)
+
+last_sent_hashes = BoundedHashCache(5000)
 
 
 # ---------------------------------------------------------------------------
@@ -992,6 +1161,7 @@ def build_help_message(is_admin):
         "/update_powell &lt;stance&gt; &lt;score&gt; &lt;note&gt;",
         "/update_etf &lt;summary&gt;",
         "/renew &lt;name/id&gt;",
+        "/lifecycle — Signal lifecycle status",
     ]
     return "\n".join(common_lines + [""] + admin_lines)
 
@@ -1097,129 +1267,149 @@ async def rsi_scanner_loop(session):
             pulse_score = pulse_result["score"]
 
             for symbol in tracked_coins:
-                pair = symbol_to_pair(symbol)
-                for interval, meta in rsi_config["intervals"].items():
-                    state = parse_timeframe_state(pair, interval)
+                try:
+                    pair = symbol_to_pair(symbol)
+                    for interval, meta in rsi_config["intervals"].items():
+                        state = parse_timeframe_state(pair, interval)
 
-                    # Fetch candles for RSI and local SMA
-                    candles = await fetch_with_backoff(
-                        session,
-                        "https://api.binance.com/api/v3/klines",
-                        {"symbol": pair, "interval": interval, "limit": 80},
-                    )
-                    if not candles:
-                        continue
+                        # Fetch candles for RSI and local SMA
+                        candles = await fetch_with_backoff(
+                            session,
+                            "https://api.binance.com/api/v3/klines",
+                            {"symbol": pair, "interval": interval, "limit": 80},
+                        )
+                        if not candles:
+                            continue
 
-                    close_prices = [float(candle[4]) for candle in candles]
-                    candle_highs = [float(candle[2]) for candle in candles]
-                    candle_lows = [float(candle[3]) for candle in candles]
-                    volumes = [float(candle[5]) for candle in candles]
-                    current_price = close_prices[-1]
-                    rsi = calculate_rsi(close_prices)
+                        close_prices = [float(candle[4]) for candle in candles]
+                        candle_highs = [float(candle[2]) for candle in candles]
+                        candle_lows = [float(candle[3]) for candle in candles]
+                        volumes = [float(candle[5]) for candle in candles]
+                        current_price = close_prices[-1]
+                        rsi = calculate_rsi(close_prices)
 
-                    # Basic direction gate
-                    if rsi > 30 and rsi < 70:
-                        # Reset state if neutral
-                        if state["state"] != "NEUTRAL":
-                            state["state"] = "NEUTRAL"
-                            await asyncio.to_thread(save_rsi_state, rsi_state_tracker)
-                        continue
+                        # Basic direction gate
+                        if rsi > 30 and rsi < 70:
+                            # Reset state if neutral
+                            if state["state"] != "NEUTRAL":
+                                state["state"] = "NEUTRAL"
+                                await asyncio.to_thread(save_rsi_state, rsi_state_tracker)
+                            continue
 
-                    recent_volumes = volumes[-21:-1] if len(volumes) >= 21 else volumes[:-1]
-                    average_volume = sum(recent_volumes) / max(len(recent_volumes), 1)
-                    volume_ratio = (volumes[-1] / average_volume) if average_volume else 1.0
+                        recent_volumes = volumes[-21:-1] if len(volumes) >= 21 else volumes[:-1]
+                        average_volume = sum(recent_volumes) / max(len(recent_volumes), 1)
+                        volume_ratio = (volumes[-1] / average_volume) if average_volume else 1.0
 
-                    current_state = "OVERBOUGHT" if rsi >= 70 else "OVERSOLD"
+                        current_state = "OVERBOUGHT" if rsi >= 70 else "OVERSOLD"
 
-                    # Check if state changed or we are re-triggering after cooldown
-                    is_new_state = current_state != state["state"]
-                    is_cooldown_done = cooldown_complete(state["last_alert_at"], rsi_config["cooldown_hours"])
+                        # Check if state changed or we are re-triggering after cooldown
+                        is_new_state = current_state != state["state"]
+                        is_cooldown_done = cooldown_complete(state["last_alert_at"], rsi_config["cooldown_hours"])
 
-                    if is_new_state or is_cooldown_done:
-                        # Fetch extra factors for scoring
-                        sma50_4h = await fetch_sma_trend(session, symbol, "4h", 50)
-                        sma50_1d = await fetch_sma_trend(session, symbol, "1d", 50)
-                        liq_data = await fetch_coin_liquidations(session, symbol)
+                        if is_new_state or is_cooldown_done:
+                            # Fetch extra factors for scoring
+                            sma50_4h = await fetch_sma_trend(session, symbol, "4h", 50)
+                            sma50_1d = await fetch_sma_trend(session, symbol, "1d", 50)
+                            liq_data = await fetch_coin_liquidations(session, symbol)
 
-                        # EMA21 calculation from 4H close prices
-                        ema21 = close_prices[0]
-                        multiplier = 2.0 / (21 + 1)
-                        for cp in close_prices[1:]:
-                            ema21 = (cp - ema21) * multiplier + ema21
+                            # EMA21 calculation from 4H close prices
+                            ema21 = close_prices[0]
+                            multiplier = 2.0 / (21 + 1)
+                            for cp in close_prices[1:]:
+                                ema21 = (cp - ema21) * multiplier + ema21
 
-                        # Market Structure Detection (HH/HL vs LH/LL)
-                        structure = get_market_structure(candle_highs, candle_lows)
+                            # Market Structure Detection (HH/HL vs LH/LL)
+                            structure = get_market_structure(candle_highs, candle_lows)
 
-                        # Combined Micro Trend: EMA21 + Structure
-                        if current_price > ema21 and structure == "HH_HL":
-                            micro_trend = "BULLISH"
-                            trend_4h = "BULL"
-                        elif current_price < ema21 and structure == "LH_LL":
-                            micro_trend = "BEARISH"
-                            trend_4h = "BEAR"
-                        else:
-                            micro_trend = "WEAK"
-                            trend_4h = "BEAR"  # treat unclear as non-confirming
-
-                        symbol_data = {
-                            "symbol": symbol,
-                            "price": current_price,
-                            "sma50": sma50_4h,
-                            "rsi": rsi,
-                            "volume_ratio": volume_ratio,
-                            "trend_4h": trend_4h,
-                            "trend_1d": "BULL" if current_price > sma50_1d else "BEAR",
-                            "structure": structure,
-                            "micro_trend": micro_trend,
-                        }
-
-                        signal_result = calculate_score(symbol_data, pulse_score, liq_data)
-
-                        if signal_result:
-                            # Attach structure data for dispatch
-                            signal_result["structure"] = structure
-                            signal_result["micro_trend"] = micro_trend
-                            signal_result["macro_trend"] = symbol_data["trend_1d"]
-                            signal_result["rsi_raw"] = rsi
-                            score = signal_result["score"]
-
-                            # Log to signal_history regardless of threshold (for backtesting)
-                            await asyncio.to_thread(
-                                database.log_signal,
-                                symbol,
-                                "RSI",
-                                signal_result["direction"],
-                                score,
-                                signal_result["components"]["trend_score"],
-                                signal_result["components"]["volume_score"],
-                                signal_result["components"]["rsi_score"],
-                                signal_result["components"]["liq_score"],
-                                signal_result["components"]["pulse_score"],
-                                signal_result["components"]["alignment_score"],
-                                signal_result["strength"],
-                                "|".join(signal_result["rationale"]),
-                                pulse_score,
-                                interval,
-                                current_price,
-                                rsi,
-                                volume_ratio,
-                                liq_data["longs"],
-                                liq_data["shorts"],
-                            )
-
-                            # Filter by sensitivity
-                            if score >= sensitivity:
-                                await dispatch_signal_alert(session, signal_result, current_price)
-                                state["last_alert_at"] = utc_now().isoformat()
-                                print(f"🚀 Signal dispatched: {symbol} {interval} Score:{score}")
+                            # Combined Micro Trend: EMA21 + Structure
+                            if current_price > ema21 and structure == "HH_HL":
+                                micro_trend = "BULLISH"
+                                trend_4h = "BULL"
+                            elif current_price < ema21 and structure == "LH_LL":
+                                micro_trend = "BEARISH"
+                                trend_4h = "BEAR"
                             else:
-                                print(
-                                    f"🟡 Signal suppressed (Score {score} < Threshold {sensitivity}): "
-                                    f"{symbol} {interval}"
+                                micro_trend = "WEAK"
+                                trend_4h = "BEAR"  # treat unclear as non-confirming
+
+                            symbol_data = {
+                                "symbol": symbol,
+                                "price": current_price,
+                                "sma50": sma50_4h,
+                                "rsi": rsi,
+                                "volume_ratio": volume_ratio,
+                                "trend_4h": trend_4h,
+                                "trend_1d": "BULL" if current_price > sma50_1d else "BEAR",
+                                "structure": structure,
+                                "micro_trend": micro_trend,
+                            }
+
+                            signal_result = calculate_score(symbol_data, pulse_score, liq_data)
+
+                            if signal_result:
+                                # Attach structure data for dispatch
+                                signal_result["structure"] = structure
+                                signal_result["micro_trend"] = micro_trend
+                                signal_result["macro_trend"] = symbol_data["trend_1d"]
+                                signal_result["rsi_raw"] = rsi
+
+                                # Signal Lifecycle State Machine (overlay)
+                                prev_lifecycle = active_signal_states.get(symbol, {}).get("state", "NEUTRAL")
+                                lifecycle = evaluate_signal_lifecycle(
+                                    symbol, current_price, rsi,
+                                    candle_highs, candle_lows, close_prices
+                                )
+                                signal_result["lifecycle_state"] = lifecycle["state"]
+                                signal_result["lifecycle_zone"] = lifecycle.get("zone")
+
+                                # Send invalidation notice if state just changed to INVALIDATED
+                                if lifecycle["state"] == "INVALIDATED" and prev_lifecycle != "INVALIDATED":
+                                    fire_and_forget(send_invalidation_notice(
+                                        session, symbol,
+                                        lifecycle.get("support", 0),
+                                        lifecycle.get("resistance", 0)
+                                    ))
+
+                                score = signal_result["score"]
+
+                                # Log to signal_history regardless of threshold (for backtesting)
+                                await asyncio.to_thread(
+                                    database.log_signal,
+                                    symbol,
+                                    "RSI",
+                                    signal_result["direction"],
+                                    score,
+                                    signal_result["components"]["trend_score"],
+                                    signal_result["components"]["volume_score"],
+                                    signal_result["components"]["rsi_score"],
+                                    signal_result["components"]["liq_score"],
+                                    signal_result["components"]["pulse_score"],
+                                    signal_result["components"]["alignment_score"],
+                                    signal_result["strength"],
+                                    "|".join(signal_result["rationale"]),
+                                    pulse_score,
+                                    interval,
+                                    current_price,
+                                    rsi,
+                                    volume_ratio,
+                                    liq_data["longs"],
+                                    liq_data["shorts"],
                                 )
 
-                        state["state"] = current_state
-                        await asyncio.to_thread(save_rsi_state, rsi_state_tracker)
+                                # Filter by sensitivity
+                                if score >= sensitivity:
+                                    # DECOUPLED: Queue for background dispatch
+                                    fire_and_forget(dispatch_signal_alert(session, signal_result, current_price))
+                                    state["last_alert_at"] = utc_now().isoformat()
+                                    print(f"🚀 Signal queued: {symbol} {interval} Score:{score} Lifecycle:{lifecycle['state']}")
+                                else:
+                                    print(f"🟡 Signal suppressed (Score {score} < {sensitivity}): {symbol} {interval}")
+
+                            state["state"] = current_state
+                            await asyncio.to_thread(save_rsi_state, rsi_state_tracker)
+                except Exception as coin_exc:
+                    print(f"⚠️ Error processing coin {symbol}: {coin_exc}")
+                    continue
 
             await asyncio.sleep(600)
         except Exception as exc:
@@ -1327,7 +1517,8 @@ async def binance_liquidation_listener(session):
                                         f"<b>Intelligence Layer:</b> {insight}\n\n"
                                         f"<i>Disclaimer: Market analysis only, not financial advice.</i>"
                                     )
-                                    await broadcast_message(session, alert_message)
+                                    # DECOUPLED: Queue for background broadcast
+                                    fire_and_forget(broadcast_message(session, alert_message))
                                     await asyncio.to_thread(
                                         database.log_alert, "liquidation", symbol, alert_message, iso_now()
                                     )
@@ -1379,6 +1570,7 @@ async def register_admin_commands(session):
         {"command": "setsensitivity", "description": "Set signal strictness"},
         {"command": "testsignal", "description": "Simulate signal privately"},
         {"command": "signal", "description": "Manual broadcast signal"},
+        {"command": "lifecycle", "description": "Signal lifecycle status"},
     ]
 
     try:
@@ -1731,6 +1923,38 @@ async def handle_admin_command(session, command, args, chat_id):
             await dispatch_signal_alert(session, signal_result, current_price)
         else:
             await send_telegram_message(session, chat_id, f"⚠️ No actionable signal for {symbol} right now (RSI in neutral zone).")
+        return
+    if command == "/lifecycle":
+        config = await load_config()
+        tracked = config["tracked_coins"]
+        lines = ["<b>📊 Signal Lifecycle Status</b>\n"]
+        for sym in tracked:
+            ls = active_signal_states.get(sym, {})
+            state = ls.get("state", "NEUTRAL")
+            zone = ls.get("zone")
+            support = ls.get("support", 0)
+            resistance = ls.get("resistance", 0)
+            last_upd = ls.get("last_updated")
+
+            state_icons = {"NEUTRAL": "⏸️", "WATCH": "👁️", "EARLY": "⚡", "CONFIRMED": "✅", "INVALIDATED": "❌"}
+            icon = state_icons.get(state, "⏸️")
+
+            age_str = "—"
+            if last_upd:
+                age = datetime.now(timezone.utc) - last_upd
+                hours = int(age.total_seconds() // 3600)
+                mins = int((age.total_seconds() % 3600) // 60)
+                age_str = f"{hours}h {mins}m ago"
+
+            line = f"{icon} <b>#{sym}</b>: {state}"
+            if zone:
+                line += f" (near {zone.lower()})"
+            if support and resistance:
+                line += f"\n   S: ${support:,.2f} | R: ${resistance:,.2f}"
+            line += f"\n   Updated: {age_str}"
+            lines.append(line)
+
+        await send_telegram_message(session, chat_id, "\n".join(lines))
         return
 
     if command == "/macro":
@@ -2218,6 +2442,140 @@ async def telegram_long_polling(session):
         await asyncio.sleep(0.5)
 
 
+# ---------------------------------------------------------------------------
+# Sunday Weekly Report (Pro Only)
+# ---------------------------------------------------------------------------
+
+async def build_weekly_report(session) -> str:
+    """
+    Builds a premium weekly intelligence report.
+    Includes: total signals, average score, top signals, most active coin,
+    current lifecycle status, and an AI commentary.
+    """
+    summary = await asyncio.to_thread(database.get_weekly_signal_summary, 7)
+    if not summary or summary.get("total", 0) == 0:
+        return (
+            "📊 <b>WEEKLY INTELLIGENCE REPORT</b>\n"
+            f"📅 Week ending: {datetime.now(timezone.utc).strftime('%B %d, %Y')}\n\n"
+            "No signals were generated this week.\n"
+            "The market remained in neutral territory across all tracked assets.\n\n"
+            "<i>Market analysis only. Not financial advice.</i>"
+        )
+
+    total = summary["total"]
+    avg_score = summary["avg_score"]
+    most_active = summary["most_active"]
+    best_signals = summary.get("best_signals", [])
+
+    # Build best signals section
+    best_lines = []
+    for sig in best_signals[:5]:
+        sym, direction, score, created = sig[0], sig[1], sig[2], sig[3]
+        emoji = "🟢" if direction == "LONG" else "🔴"
+        best_lines.append(f"  {emoji} #{sym} {direction} — Score: {score}%")
+
+    # Current lifecycle status snapshot
+    lifecycle_lines = []
+    config = await load_config()
+    for sym in config["tracked_coins"]:
+        ls = active_signal_states.get(sym, {})
+        state = ls.get("state", "NEUTRAL")
+        icons = {"NEUTRAL": "⏸️", "WATCH": "👁️", "EARLY": "⚡", "CONFIRMED": "✅", "INVALIDATED": "❌"}
+        lifecycle_lines.append(f"  {icons.get(state, '⏸️')} #{sym}: {state}")
+
+    # AI Summary (optional, with fallback)
+    ai_summary = "Market conditions were mixed this week. Stay disciplined and follow your levels."
+    try:
+        prompt = (
+            f"You are a crypto market analyst. Summarize this week's activity in 2-3 sentences:\n"
+            f"- Total signals generated: {total}\n"
+            f"- Average signal confidence: {avg_score}%\n"
+            f"- Most active asset: {most_active}\n"
+            f"Be concise, professional, and avoid hype."
+        )
+        ai_raw = await call_gemini_rest(session, prompt)
+        if ai_raw and len(ai_raw.strip()) > 20:
+            ai_summary = html_safe(ai_raw.strip())
+    except Exception:
+        pass
+
+    report = (
+        f"📊 <b>WEEKLY INTELLIGENCE REPORT</b>\n"
+        f"📅 Week ending: {datetime.now(timezone.utc).strftime('%B %d, %Y')}\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"📈 <b>Week Summary</b>\n"
+        f"  Total Signals: {total}\n"
+        f"  Avg Confidence: {avg_score}%\n"
+        f"  Most Active: #{most_active}\n\n"
+        f"🏆 <b>Top Signals This Week</b>\n"
+        f"{chr(10).join(best_lines) if best_lines else '  No qualifying signals'}\n\n"
+        f"📍 <b>Current Lifecycle Status</b>\n"
+        f"{chr(10).join(lifecycle_lines)}\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🤖 <b>AI Analysis</b>\n"
+        f"{ai_summary}\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"<i>Market analysis only. Not financial advice.</i>"
+    )
+
+    return report
+
+
+async def weekly_report_loop(session):
+    """
+    Sends weekly report to Pro users every Sunday at 10:00 UTC.
+    """
+    print("📊 Weekly Report Scheduler is Live...")
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+
+            # Calculate seconds until next Sunday 10:00 UTC
+            days_until_sunday = (6 - now.weekday()) % 7
+            if days_until_sunday == 0 and now.hour >= 10:
+                days_until_sunday = 7
+
+            next_sunday = now.replace(hour=10, minute=0, second=0, microsecond=0) + timedelta(days=days_until_sunday)
+            wait_seconds = (next_sunday - now).total_seconds()
+
+            print(f"⏳ Next weekly report in {wait_seconds / 3600:.1f} hours")
+            await asyncio.sleep(wait_seconds)
+
+            # Build and send report
+            report = await build_weekly_report(session)
+
+            # Send to Pro users only
+            users_with_tiers = await asyncio.to_thread(database.get_all_users_with_tiers)
+            sent = 0
+            for row in users_with_tiers:
+                uid, tier = row[0], row[2]
+                if tier == "pro":
+                    if await send_telegram_message(session, uid, report):
+                        sent += 1
+                    await asyncio.sleep(0.05)
+
+            await asyncio.to_thread(database.log_alert, "weekly_report", "PRO", report, iso_now())
+            print(f"📊 Weekly Report sent to {sent} Pro users.")
+
+        except Exception as exc:
+            print(f"Weekly Report Error: {exc}")
+            await asyncio.sleep(3600)
+
+
+async def database_maintenance_loop():
+    """Background loop to keep SQLite healthy."""
+    print("🔧 Database Maintenance Engine is Live...")
+    while True:
+        try:
+            # Run every 6 hours
+            await asyncio.sleep(6 * 3600)
+            await asyncio.to_thread(database.run_maintenance)
+            await asyncio.to_thread(database.cleanup_old_data)
+        except Exception as exc:
+            print(f"Database Maintenance Error: {exc}")
+            await asyncio.sleep(3600)
+
+
 async def main():
     if os.name == "nt":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -2247,6 +2605,7 @@ async def main():
             safe_loop(daily_digest_loop, session),
             safe_loop(news_checker_loop, session),
             safe_loop(macro_calendar_loop, session),
+            safe_loop(weekly_report_loop, session),
             safe_loop(database_maintenance_loop),
             safe_loop(run_webhook_server, session, TELEGRAM_API_URL),
         )

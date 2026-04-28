@@ -1,0 +1,55 @@
+# Implementation Plan - Phase 2, Week 2: Signal Scoring Engine
+
+## Goal
+Transform the bot from a "Data Reporter" to an "Intelligence Analyst." Every alert will now be processed through a confluence engine to calculate a **Signal Confidence Score (1-100)**.
+
+## Proposed Changes
+
+### 1. Database Schema (`database.py`)
+- **[MODIFY]** Add a new table `signal_history` to track the performance of signals.
+```sql
+CREATE TABLE IF NOT EXISTS signal_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol          TEXT,
+    score           INTEGER,
+    rationale       TEXT,
+    signal_type     TEXT,
+    market_pulse    INTEGER,
+    timestamp       TEXT
+);
+```
+
+### 2. Scoring Logic (`utils/scoring_engine.py`) [NEW]
+Create a dedicated engine to handle the math of confluence.
+- **Function:** `calculate_score(symbol_data, market_pulse, liquidations_24h)`
+- **Weighting Matrix:**
+  - **Trend Confluence (20%):** Score 20 if Price > SMA50 (for Longs) or Price < SMA50 (for Shorts).
+  - **Volume Intensity (30%):** Linear scale based on Volume Ratio (1.0x = 0pts, 2.0x = 30pts).
+  - **RSI Extremity (25%):** Score 25 if RSI is < 25 or > 75.
+  - **Liquidation Alignment (15%):** Score 15 if recent liquidations match the direction of the signal.
+  - **Market Pulse Bonus (10%):** Bonus if the "Extreme Greed/Fear" matches the trend.
+
+### 3. Alert Refactoring (`main.py`)
+- **[MODIFY] `rsi_scanner_loop`**:
+  - Instead of direct broadcast, it sends data to `scoring_engine`.
+  - It only triggers `broadcast_message` if `score >= threshold`.
+- **[MODIFY] `build_rsi_alert` / `build_liquidation_alert`**:
+  - Update templates to include the **Signal Meter**.
+  - Example: `📊 Signal Confidence: [🟩🟩🟩🟩⬜] 80%`
+- **[MODIFY] `broadcast_message`**:
+  - Add logic to show "Rationale" ONLY for Pro users.
+
+### 4. Admin Control (`main.py`)
+- **[NEW]** `/setsensitivity <0-100>`: Admin command to adjust how "strict" the bot is with alerts.
+
+## User Review Required
+> [!IMPORTANT]
+> **Scoring Weighting:** I have set Volume at 30% and Trend at 20%. Do you want "Volume" to be even more dominant, or is this balance good?
+>
+> [!NOTE]
+> **Signal Threshold:** By default, I will set the broadcast threshold to 50%. Alerts scoring below 50 will be logged but not sent to users to prevent noise.
+
+## Verification Plan
+1. **Mock Signal Test:** Run a script that simulates a "Perfect Storm" (High Volume + RSI Extreme + Trend Alignment) and verify it hits a 90+ score.
+2. **Noise Filter Test:** Verify that weak signals (Low Volume RSI hits) are correctly filtered and not broadcasted.
+3. **Pro/Free View:** Verify that a Free user cannot see the "Rationale" breakdown in the same alert.

@@ -805,6 +805,84 @@ def claim_cooldown_for_user(user_id, coin, alert_type, cooldown_minutes=15):
         conn.close()
 
 
+def run_maintenance():
+    """Runs SQLite maintenance commands to ensure long-term performance."""
+    conn = _connect()
+    try:
+        conn.execute("PRAGMA optimize;")
+        conn.execute("ANALYZE;")
+        conn.commit()
+        print("🔧 Database maintenance complete (Optimize/Analyze).")
+    except Exception as e:
+        print(f"❌ Database maintenance error: {e}")
+    finally:
+        conn.close()
+
+
+def get_weekly_signal_summary(days=7):
+    """Aggregates signal history for the past 7 days."""
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Total signals
+        cursor.execute("SELECT COUNT(*) FROM signal_history WHERE created_at >= ?", (cutoff,))
+        total_signals = cursor.fetchone()[0] or 0
+        
+        # Most frequent symbol
+        cursor.execute("""
+            SELECT symbol, COUNT(*) as cnt 
+            FROM signal_history 
+            WHERE created_at >= ? 
+            GROUP BY symbol 
+            ORDER BY cnt DESC LIMIT 1
+        """, (cutoff,))
+        freq_row = cursor.fetchone()
+        most_active = freq_row[0] if freq_row else "None"
+        
+        # Average score
+        cursor.execute("SELECT AVG(score) FROM signal_history WHERE created_at >= ?", (cutoff,))
+        avg_score = cursor.fetchone()[0] or 0
+        
+        # Best performers (highest score signals)
+        cursor.execute("""
+            SELECT symbol, direction, score, created_at 
+            FROM signal_history 
+            WHERE created_at >= ? 
+            ORDER BY score DESC LIMIT 5
+        """, (cutoff,))
+        best_signals = cursor.fetchall()
+        
+        return {
+            "total": total_signals,
+            "most_active": most_active,
+            "avg_score": round(avg_score, 1),
+            "best_signals": best_signals
+        }
+    except Exception as e:
+        print(f"Error getting weekly summary: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def cleanup_old_data(days=30):
+    """Deletes logs and history older than 30 days to save space."""
+    conn = _connect()
+    try:
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("DELETE FROM signal_history WHERE created_at < ?", (cutoff,))
+        conn.execute("DELETE FROM alert_history WHERE created_at < ?", (cutoff,))
+        conn.execute("DELETE FROM liquidations WHERE created_at < ?", (cutoff,))
+        conn.commit()
+        print(f"🧹 Database cleanup: Removed data older than {days} days.")
+    except Exception as e:
+        print(f"❌ Database cleanup error: {e}")
+    finally:
+        conn.close()
+
+
 def get_user_pro_info(user_id):
     """Returns (tier, pro_since) tuple for a user."""
     conn = _connect()
@@ -852,5 +930,33 @@ def reset_cooldown_for_user(user_id, coin, alert_type):
             (str(user_id), str(coin), alert_type),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def check_weekly_sent(week_str):
+    """Checks if weekly report was already sent for this week."""
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM weekly_data WHERE week_start = ?", (str(week_str),))
+        return cursor.fetchone() is not None
+    except:
+        return False
+    finally:
+        conn.close()
+
+
+def mark_weekly_sent(week_str):
+    """Marks weekly report as sent."""
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO weekly_data (user_id, week_start, coin) VALUES ('GLOBAL', ?, 'NONE')",
+            (str(week_str),),
+        )
+        conn.commit()
+    except:
+        pass
     finally:
         conn.close()

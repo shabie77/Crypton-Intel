@@ -82,6 +82,35 @@ def get_strength_label(score: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Market Structure Detection
+# ---------------------------------------------------------------------------
+
+def get_market_structure(highs: list, lows: list) -> str:
+    """
+    Detects market structure using last 10 candles.
+    Compares recent 5 candles vs previous 5 candles.
+    Returns: "HH_HL" (bullish), "LH_LL" (bearish), or "WEAK"
+
+    HH_HL = Higher Highs + Higher Lows = bullish structure
+    LH_LL = Lower Highs + Lower Lows = bearish structure
+    WEAK  = No clear pattern confirmed
+    """
+    if len(highs) < 10 or len(lows) < 10:
+        return "WEAK"
+
+    current_high = max(highs[-5:])
+    current_low  = min(lows[-5:])
+    prev_high    = max(highs[-10:-5])
+    prev_low     = min(lows[-10:-5])
+
+    if current_high > prev_high and current_low > prev_low:
+        return "HH_HL"
+    elif current_high < prev_high and current_low < prev_low:
+        return "LH_LL"
+    return "WEAK"
+
+
+# ---------------------------------------------------------------------------
 # Core Scoring Function
 # ---------------------------------------------------------------------------
 

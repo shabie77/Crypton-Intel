@@ -994,8 +994,8 @@ def load_bot_state(key, default=None):
     if supabase:
         try:
             res = supabase.table("bot_state").select("value").eq("key", key).maybe_single().execute()
-            if res.data:
-                return res.data["value"]
+            if res and hasattr(res, "data") and res.data:
+                return res.data.get("value") if isinstance(res.data, dict) else res.data["value"]
         except Exception as e:
             print(f"⚠️ Supabase load_bot_state error for {key}: {e}")
 

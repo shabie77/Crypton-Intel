@@ -521,7 +521,7 @@ async def dispatch_signal_alert(session, signal_result, current_price):
             "WATCH": "👁️ WATCH — Near key level",
             "EARLY": "⚡ EARLY — Momentum building",
             "CONFIRMED": "✅ CONFIRMED — High-confidence setup",
-            "INVALIDATED": "❌ INVALIDATED — Setup broken",
+            "EXPIRED": "❌ EXPIRED — Setup broken or timed out",
             "NEUTRAL": "⏸️ NEUTRAL — No active setup",
         }.get(lifecycle_state, f"⏸️ {lifecycle_state}")
 
@@ -725,7 +725,7 @@ def generate_free_summary(
         return "Early signal forming. Not confirmed yet — wait for follow-through."
     if state == "CONFIRMED":
         return "High-confidence setup detected. Momentum is in play."
-    if state == "INVALIDATED":
+    if state == "EXPIRED":
         return "Previous setup invalidated. Market is resetting."
 
     # Priority 2: Macro + Micro + RSI combinations
@@ -1714,10 +1714,10 @@ async def scan_coin_logic(
                         signal_result["lifecycle_state"] = lifecycle["state"]
                         signal_result["lifecycle_zone"] = lifecycle.get("zone")
 
-                        # Send invalidation notice if state just changed to INVALIDATED
+                        # Send invalidation notice if state just changed to EXPIRED
                         if (
-                            lifecycle["state"] == "INVALIDATED"
-                            and prev_lifecycle != "INVALIDATED"
+                            lifecycle["state"] == "EXPIRED"
+                            and prev_lifecycle != "EXPIRED"
                         ):
                             fire_and_forget(
                                 send_invalidation_notice(
@@ -2486,7 +2486,7 @@ async def handle_admin_command(session, command, args, chat_id):
                 "WATCH": "👁️",
                 "EARLY": "⚡",
                 "CONFIRMED": "✅",
-                "INVALIDATED": "❌",
+                "EXPIRED": "❌",
             }
             icon = state_icons.get(state, "⏸️")
 
@@ -3269,7 +3269,7 @@ async def build_weekly_report(session) -> str:
             "WATCH": "👁️",
             "EARLY": "⚡",
             "CONFIRMED": "✅",
-            "INVALIDATED": "❌",
+            "EXPIRED": "❌",
         }
         lifecycle_lines.append(f"  {icons.get(state, '⏸️')} #{sym}: {state}")
 

@@ -510,20 +510,7 @@ def get_24h_liquidation_stats(iso_cutoff):
     return {"total": 0.0, "longs": 0.0, "shorts": 0.0}
 
 
-async def cleanup_old_data():
-    def _run_delete():
-        conn = _connect()
-        try:
-            conn.execute("DELETE FROM liquidations WHERE timestamp < datetime('now', '-7 days')")
-            conn.execute("DELETE FROM alerts_log WHERE timestamp < datetime('now', '-7 days')")
-            conn.commit()
-            print("Database cleanup complete: old records purged.")
-        except Exception as exc:
-            print(f"Database cleanup failed: {exc}")
-        finally:
-            conn.close()
-
-    await asyncio.to_thread(_run_delete)
+# DELETED duplicated cleanup_old_data (moved and merged at line 870)
 
 
 def upgrade_user(user_id, plan_id, amount, currency):
@@ -827,14 +814,14 @@ def get_weekly_signal_summary(days=7):
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         
         # Total signals
-        cursor.execute("SELECT COUNT(*) FROM signal_history WHERE created_at >= ?", (cutoff,))
+        cursor.execute("SELECT COUNT(*) FROM signal_history WHERE timestamp >= ?", (cutoff,))
         total_signals = cursor.fetchone()[0] or 0
         
         # Most frequent symbol
         cursor.execute("""
             SELECT symbol, COUNT(*) as cnt 
             FROM signal_history 
-            WHERE created_at >= ? 
+            WHERE timestamp >= ? 
             GROUP BY symbol 
             ORDER BY cnt DESC LIMIT 1
         """, (cutoff,))
@@ -842,14 +829,14 @@ def get_weekly_signal_summary(days=7):
         most_active = freq_row[0] if freq_row else "None"
         
         # Average score
-        cursor.execute("SELECT AVG(score) FROM signal_history WHERE created_at >= ?", (cutoff,))
+        cursor.execute("SELECT AVG(score) FROM signal_history WHERE timestamp >= ?", (cutoff,))
         avg_score = cursor.fetchone()[0] or 0
         
         # Best performers (highest score signals)
         cursor.execute("""
-            SELECT symbol, direction, score, created_at 
+            SELECT symbol, direction, score, timestamp 
             FROM signal_history 
-            WHERE created_at >= ? 
+            WHERE timestamp >= ? 
             ORDER BY score DESC LIMIT 5
         """, (cutoff,))
         best_signals = cursor.fetchall()
@@ -868,13 +855,14 @@ def get_weekly_signal_summary(days=7):
 
 
 def cleanup_old_data(days=30):
-    """Deletes logs and history older than 30 days to save space."""
+    """Deletes logs and history older than specified days to save space."""
     conn = _connect()
     try:
-        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-        conn.execute("DELETE FROM signal_history WHERE created_at < ?", (cutoff,))
-        conn.execute("DELETE FROM alert_history WHERE created_at < ?", (cutoff,))
-        conn.execute("DELETE FROM liquidations WHERE created_at < ?", (cutoff,))
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        # Purge signal history, alerts, and liquidations
+        conn.execute("DELETE FROM signal_history WHERE timestamp < ?", (cutoff,))
+        conn.execute("DELETE FROM alerts_log WHERE timestamp < ?", (cutoff,))
+        conn.execute("DELETE FROM liquidations WHERE timestamp < ?", (cutoff,))
         conn.commit()
         print(f"🧹 Database cleanup: Removed data older than {days} days.")
     except Exception as e:
@@ -941,7 +929,8 @@ def check_weekly_sent(week_str):
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM weekly_data WHERE week_start = ?", (str(week_str),))
         return cursor.fetchone() is not None
-    except:
+    except Exception as exc:
+        print(f"Error checking weekly sent: {exc}")
         return False
     finally:
         conn.close()
@@ -956,7 +945,7 @@ def mark_weekly_sent(week_str):
             (str(week_str),),
         )
         conn.commit()
-    except:
-        pass
+    except Exception as exc:
+        print(f"Error marking weekly sent: {exc}")
     finally:
         conn.close()

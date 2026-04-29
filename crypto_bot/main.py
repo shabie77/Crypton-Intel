@@ -1334,7 +1334,7 @@ async def rsi_scanner_loop(session):
                             # Reset state if neutral
                             if state["state"] != "NEUTRAL":
                                 state["state"] = "NEUTRAL"
-                                await asyncio.to_thread(save_rsi_state, rsi_state_tracker)
+                                await save_rsi_state(rsi_state_tracker)
                             continue
 
                         recent_volumes = volumes[-21:-1] if len(volumes) >= 21 else volumes[:-1]
@@ -1447,7 +1447,7 @@ async def rsi_scanner_loop(session):
                                     print(f"🟡 Signal suppressed (Score {score} < {sensitivity}): {symbol} {interval}")
 
                             state["state"] = current_state
-                            await asyncio.to_thread(save_rsi_state, rsi_state_tracker)
+                            await save_rsi_state(rsi_state_tracker)
                             # Persist lifecycle state to disk
                             await save_lifecycle_state(active_signal_states)
                 except Exception as coin_exc:
@@ -2308,17 +2308,7 @@ async def macro_calendar_loop(session):
         await asyncio.sleep(300)  # Check every 5 minutes for precise 2-hour alerts
 
 
-async def database_maintenance_loop():
-    """Runs database cleanup once on startup and then every 7 days."""
-    print("🧹 Database Maintenance Engine is Live...")
-    while True:
-        try:
-            await database.cleanup_old_data()
-        except Exception as exc:
-            print(f"Database Maintenance Error: {exc}")
 
-        # Wait for 7 days (604800 seconds)
-        await asyncio.sleep(604800)
 
 
 async def telegram_long_polling(session):

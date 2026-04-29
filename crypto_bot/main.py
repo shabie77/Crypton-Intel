@@ -884,12 +884,6 @@ def evaluate_signal_lifecycle(
         "last_updated": last_updated.isoformat() if isinstance(last_updated, datetime) else last_updated,
     }
 
-    # Persist state (Async/Thread safe)
-    def save_bg():
-        database.save_bot_state("lifecycle_state", active_signal_states)
-    
-    asyncio.get_event_loop().run_in_executor(None, save_bg)
-
     return active_signal_states[symbol]
 
 
@@ -1782,7 +1776,6 @@ async def scan_coin_logic(
 
                     state["state"] = current_state
                     await save_rsi_state(rsi_state_tracker)
-                    await save_lifecycle_state(active_signal_states)
         except Exception as coin_exc:
             print(f"⚠️ Error processing coin {symbol}: {coin_exc}")
 
@@ -1814,6 +1807,7 @@ async def rsi_scanner_loop(session):
                 for symbol in tracked_coins
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
+            await save_lifecycle_state(active_signal_states)
 
             await asyncio.sleep(600)
         except Exception as exc:

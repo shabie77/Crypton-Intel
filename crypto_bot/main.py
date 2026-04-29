@@ -807,15 +807,25 @@ def evaluate_signal_lifecycle(
 ) -> dict:
     """
     Evaluates signal lifecycle state machine for a symbol.
-    Transitions: NEUTRAL → WATCH → EARLY → CONFIRMED → INVALIDATED
-    Fast-track: NEUTRAL → CONFIRMED (if RSI extreme AND near key level)
+    Transitions: NEUTRAL → WATCH → EARLY → CONFIRMED → EXPIRED
+    Stage 3 Requirements:
+    - 5-State Machine
+    - Supabase Cloud Persistence
+    - RSI Mid-range exit (45-55)
     """
     levels = calculate_key_levels(highs, lows)
     atr_buffer = calculate_zone_buffer(highs, lows, closes)
 
     prev = active_signal_states.get(symbol, {})
     prev_state = prev.get("state", "NEUTRAL")
-    last_updated = prev.get("last_updated")
+    last_updated_str = prev.get("last_updated")
+    
+    if last_updated_str and isinstance(last_updated_str, str):
+        last_updated = datetime.fromisoformat(last_updated_str)
+    elif isinstance(last_updated_str, datetime):
+        last_updated = last_updated_str
+    else:
+        last_updated = None
 
     new_state = prev_state
     zone = None
@@ -827,57 +837,42 @@ def evaluate_signal_lifecycle(
         zone = "RESISTANCE"
 
     # State transitions
-    if prev_state in ("NEUTRAL", "INVALIDATED"):
-        if zone and (rsi <= 30 or rsi >= 70):
-            # Fast-track: extreme RSI + near key level → skip to CONFIRMED
-            new_state = "CONFIRMED"
+    if prev_state in ("NEUTRAL", "EXPIRED"):
+        if rsi <= 35 or rsi >= 65:
+            new_state = "WATCH"
         elif zone:
             new_state = "WATCH"
 
     elif prev_state == "WATCH":
-        if rsi <= 35 or rsi >= 65:
+        if rsi <= 30 or rsi >= 70:
             new_state = "EARLY"
-        elif not zone:
-            # Price drifted away from level — reset
+        elif not zone and (rsi > 35 and rsi < 65):
             new_state = "NEUTRAL"
 
     elif prev_state == "EARLY":
-        if rsi <= 30 or rsi >= 70:
+        # Check scoring engine for confirmation
+        # This is handled in the main scanner loop which calls calculate_score
+        # But we can pre-transition if RSI stays extreme
+        if rsi <= 25 or rsi >= 75:
             new_state = "CONFIRMED"
-        elif not zone:
-            new_state = "NEUTRAL"
+        elif not zone and (rsi > 40 and rsi < 60):
+            new_state = "EXPIRED"
 
     elif prev_state == "CONFIRMED":
-        # Invalidation: price breaks through level by > 1 ATR
-        if zone == "SUPPORT" and price < (levels["support"] - atr_buffer):
-            new_state = "INVALIDATED"
-            zone = None
-        elif zone == "RESISTANCE" and price > (
-            levels["resistance"] + atr_buffer
-        ):
-            new_state = "INVALIDATED"
-            zone = None
-        elif not zone:
-            # DRIFT LOGIC: If price drifts > 5% away from level, reset to NEUTRAL
-            dist_support = abs(price - levels["support"]) / levels["support"]
-            dist_resist = (
-                abs(price - levels["resistance"]) / levels["resistance"]
-            )
-            if dist_support > 0.05 and dist_resist > 0.05:
-                new_state = "NEUTRAL"
+        # Exit Condition: RSI returns to mid-range (45-55) OR price breaks level
+        if rsi >= 45 and rsi <= 55:
+            new_state = "EXPIRED"
+        elif zone == "SUPPORT" and price < (levels["support"] - atr_buffer):
+            new_state = "EXPIRED"
+        elif zone == "RESISTANCE" and price > (levels["resistance"] + atr_buffer):
+            new_state = "EXPIRED"
 
-    # Cooldown: don't re-enter WATCH within 6 hours
-    if new_state == "WATCH" and prev_state == "WATCH":
-        if (
-            last_updated
-            and (datetime.now(timezone.utc) - last_updated).total_seconds()
-            < 21600
-        ):
-            return active_signal_states[symbol]
-
+    # Cooldown check removed for simpler state persistence sync
+    
     # Update timestamp only on state change
+    now = datetime.now(timezone.utc)
     if new_state != prev_state or not last_updated:
-        last_updated = datetime.now(timezone.utc)
+        last_updated = now
 
     active_signal_states[symbol] = {
         "state": new_state,
@@ -885,8 +880,11 @@ def evaluate_signal_lifecycle(
         "support": levels["support"],
         "resistance": levels["resistance"],
         "atr_buffer": atr_buffer,
-        "last_updated": last_updated,
+        "last_updated": last_updated.isoformat() if isinstance(last_updated, datetime) else last_updated,
     }
+
+    # Persist immediately to Supabase
+    database.save_bot_state("lifecycle_state", active_signal_states)
 
     return active_signal_states[symbol]
 
@@ -1180,59 +1178,33 @@ async def fetch_symbol_snapshot(session, symbol, config):
         return res
 
 
-def calculate_market_pulse(snapshots, config):
+async def calculate_market_pulse(snapshots, config):
+    """
+    Calculates overall market pulse score (0-100) and label.
+    """
     score = 50
-    bulls, bears = 0, 0
     for s in snapshots:
-        if not s:
-            continue
-        if s["trend_emoji"] == "🟢":
-            score += 8
-            bulls += 1
-        else:
-            score -= 12
-            bears += 1
+        if not s: continue
+        # Trend contribution
+        if s["trend_emoji"] == "🟢": score += 5
+        else: score -= 7
+        # RSI contribution
+        if s["rsi"] >= 70: score += 5
+        elif s["rsi"] <= 30: score -= 5
+        # 24h Change contribution
+        score += int(s["change_24h"] * 2)
 
-        if s["rsi"] >= 65:
-            score += 5
-        elif s["rsi"] <= 35:
-            score -= 10
-        if s["change_24h"] >= 2:
-            score += 4
-        elif s["change_24h"] <= -2:
-            score -= 6
-
-    powell_score = int(config["powell"]["score"])
-    score += (3 - powell_score) * 4
-    if config["etf"]["bias"] == "bullish":
-        score += 10
-    elif config["etf"]["bias"] == "bearish":
-        score -= 10
-
+    powell_score = int(config.get("powell", {}).get("score", 3))
+    score += (3 - powell_score) * 5
+    
     score = max(0, min(100, score))
-    label = (
-        "EXTREME FEAR"
-        if score <= 25
-        else (
-            "FEAR"
-            if score <= 40
-            else (
-                "NEUTRAL"
-                if score <= 60
-                else "GREED" if score <= 75 else "EXTREME GREED"
-            )
-        )
-    )
-    watch_next = (
-        "Watch for potential overextension."
-        if score > 75
-        else (
-            "Watch for capitulation bounce."
-            if score < 25
-            else "Watch for trend continuation."
-        )
-    )
-    return {"score": score, "label": label, "watch_next": watch_next}
+    label = "EXTREME FEAR" if score <= 25 else "FEAR" if score <= 40 else "NEUTRAL" if score <= 60 else "GREED" if score <= 80 else "EXTREME GREED"
+    
+    context = "Market is in an accumulation phase with neutral momentum."
+    if score > 60: context = "Bullish momentum is building across major assets."
+    elif score < 40: context = "Selling pressure is dominant. Watch for key support levels."
+    
+    return {"score": score, "label": label, "context": context}
 
 
 GEMINI_MODELS = [
@@ -1300,62 +1272,52 @@ async def call_groq_rest(session, prompt):
 
 async def get_ai_digest_insights(session, snapshots, pulse):
     """
-    Shared Gemini Cache for the daily digest.
-    Fetches Trader Read, Master Bias, and Global Summary in ONE call.
+    Shared Gemini call for the daily digest. 
+    Following Master Plan Stage 1 strict prompt constraints.
     """
-    cache_key = "|".join(
-        [f"{s['tag']}:{round(s['price'], 1)}" for s in snapshots if s]
-    )
+    cache_key = "|".join([f"{s['tag']}:{round(s['price'], 0)}" for s in snapshots if s])
     async with _AI_CACHE_LOCK:
         if cache_key in _AI_SUMMARY_CACHE:
             val, ts = _AI_SUMMARY_CACHE[cache_key]
-            if (
-                datetime.now() - ts
-            ).total_seconds() < 3600:  # 1 hour cache for digest
+            if (datetime.now() - ts).total_seconds() < 7200: # 2 hour cache
                 return val
 
+        market_data = {
+            "pulse": pulse,
+            "assets": [{"coin": s["tag"], "price": s["price"], "change": s["change_24h"], "rsi": s["rsi"], "trend": "BULL" if s["trend_emoji"] == "🟢" else "BEAR"} for s in snapshots if s]
+        }
+        
+        # Combined Prompt for efficiency + strictness
         prompt = (
-            f"Act as a Senior Crypto Macro Analyst. Analyze this data:\n"
-            f"Pulse: {pulse['score']}/100 ({pulse['label']})\n"
-            f"Assets: {[{'coin': s['tag'], 'price': s['price'], 'change': s['change_24h']} for s in snapshots if s]}\n\n"
-            f"Provide exactly 3 sections in valid JSON format:\n"
-            f"1. trader_read: A 1-sentence sharp market intuition (e.g., 'Bulls defending $60k but volume remains thin')\n"
-            f"2. bias: One word (BULLISH, BEARISH, or NEUTRAL)\n"
-            f"3. summary: A 2-sentence macro summary of the current situation.\n"
+            f"Act as a professional crypto analyst. Analyze this data: {json.dumps(market_data)}\n\n"
+            "Produce exactly 3 sections in valid JSON:\n"
+            "1. trader_reads: Dictionary where key is coin tag, value is exactly 3 lines of analysis. Each MUST mention a specific price level and directional bias.\n"
+            "2. market_bias: Dictionary with 'overall' (Risk-On, Risk-Off, or Neutral) and one-line bias per coin.\n"
+            "3. summary: Exactly 4 lines of market summary. Be specific, contrarian when needed, mention levels.\n"
+            "4. what_to_do: 2-3 lines of actionable, specific guidance.\n"
         )
 
         try:
-            res_text = await call_gemini_rest(
-                session, prompt
-            ) or await call_groq_rest(session, prompt)
+            res_text = await call_gemini_rest(session, prompt) or await call_groq_rest(session, prompt)
             if res_text:
-                # Basic JSON extraction in case AI adds markdown
                 match = re.search(r"\{.*\}", res_text, re.DOTALL)
                 if match:
                     data = json.loads(match.group(0))
                     result = {
-                        "trader_read": data.get(
-                            "trader_read",
-                            "Market is consolidating at key levels.",
-                        ),
-                        "bias": data.get("bias", "NEUTRAL").upper(),
-                        "summary": data.get(
-                            "summary",
-                            "Market pulse is neutral with balanced buy/sell pressure.",
-                        ),
+                        "trader_reads": data.get("trader_reads", {}),
+                        "market_bias": data.get("market_bias", {}),
+                        "summary": data.get("summary", "Market consolidating at key levels."),
+                        "what_to_do": data.get("what_to_do", "Watch for volume confirmation at support.")
                     }
                     _AI_SUMMARY_CACHE[cache_key] = (result, datetime.now())
                     return result
-        except Exception:
-            pass
+        except Exception: pass
 
-        # Fallback
-        fallback = {
-            "trader_read": "Market is in an accumulation phase.",
-            "bias": "NEUTRAL",
-            "summary": "The market is currently showing mixed signals with neutral momentum across major assets.",
+        return {
+            "trader_reads": {}, "market_bias": {"overall": "Neutral"},
+            "summary": "Market is currently showing mixed signals with neutral momentum.",
+            "what_to_do": "Monitor key levels for breakout confirmation."
         }
-        return fallback
 
 
 async def get_ai_market_summary(session, snapshots, pulse):
@@ -1365,96 +1327,111 @@ async def get_ai_market_summary(session, snapshots, pulse):
 
 
 async def build_digest_message(
-    session,
-    snapshots,
-    pulse,
-    config,
-    top_news=None,
-    upcoming_macro=None,
-    liq_stats=None,
-    macro_partial_failure=False,
-    user_tier="free",
+    session, snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None, 
+    macro_partial_failure=False, user_tier="free"
 ):
-    """
-    Builds a comprehensive Daily Market Digest with tiered output (Pro vs Free).
-    """
-    date_str = utc_now().strftime("%B %d, %Y")
-
-    # Fetch Shared AI Insights
+    date_str = utc_now().strftime("%A, %B %d, %Y")
     ai = await get_ai_digest_insights(session, snapshots, pulse)
 
     if user_tier == "pro":
-        # ---- PREMIUM INTELLIGENCE DIGEST ----
+        # 💎 PRO DIGEST — Full Master Plan Format
         lines = [
-            "💎 <b>PREMIUM INTELLIGENCE DIGEST</b>",
-            f"📅 {date_str}",
+            "💎 <b>CRYPTON INTEL PRO — DAILY DIGEST</b>",
+            f"📅 {date_str} | 9:30 AM IST",
+            "━━━━━━━━━━━━━━━━━━━━━",
             "",
             f"🌡️ <b>Market Pulse:</b> {pulse['label']} ({pulse['score']}/100)",
-            f"🎯 <b>Master Bias:</b> {ai['bias']}",
-            f"💡 <b>Trader Read:</b> {ai['trader_read']}",
-            "━━━━━━━━━━━━━━━",
+            f"📌 <b>Context:</b> {pulse['context']}",
+            "━━━━━━━━━━━━━━━━━━━━━",
             "",
-            "<b>📈 Intelligence Layers</b>",
+            "<b>📈 COIN DEEP ANALYSIS</b>",
         ]
 
         for s in snapshots:
-            if not s:
-                continue
-            # Circle = 50 MA trend, Price change = secondary
+            if not s: continue
+            trend_label = "BULLISH" if s["trend_emoji"] == "🟢" else "BEARISH"
+            vol_pct = (s["vol_ratio"] - 1) * 100
+            
+            # Status Logic (Master Plan Line 172)
+            status = "⚪ Neutral — no strong pressure"
+            if s["rsi"] >= 70: status = "🔴 Overbought — potential cooling ahead"
+            elif s["rsi"] <= 30: status = "🟢 Oversold — watch for reversal"
+            elif s["trend_emoji"] == "🟢" and s["change_24h"] < -1.0: status = "🟡 Cooling after recent move"
+            elif s["trend_emoji"] == "🔴" and s["vol_ratio"] > 1.3: status = "🔴 Selling pressure — elevated volume"
+            
+            read = ai["trader_reads"].get(s["tag"], "Analysis pending...")
+            
             lines.append(
-                f"{s['trend_emoji']} <b>#{s['tag']}</b>: ${s['price']:,.2f} ({s['change_24h']:+.2f}%)\n"
-                f"   RSI: {s['rsi']:.1f} | Vol: {s['volume_status']} ({s['vol_ratio']:.1f}x)"
+                f"{s['trend_emoji']} <b>#{s['tag']}</b> — ${s['price']:,.2f} ({s['change_24h']:+.2f}%)\n"
+                f"   RSI (1D): {s['rsi']:.1f} | Trend: {trend_label} {s['trend_emoji']} vs 50-day MA\n"
+                f"   Volume: {s['volume_status']} ({vol_pct:+.1f}% vs 20-day avg)\n"
+                f"   Status: {status}\n\n"
+                f"   📖 <b>Trader Read:</b>\n"
+                f"   {read}\n"
             )
 
         if liq_stats:
-            total_long = liq_stats.get("longs", 0) or 0
-            total_short = liq_stats.get("shorts", 0) or 0
-            lines.append("\n<b>💥 24H Liquidations</b>")
+            longs = liq_stats.get("longs", 0) or 0
+            shorts = liq_stats.get("shorts", 0) or 0
+            total = longs + shorts
+            long_pct = (longs / total * 100) if total > 0 else 50
             lines.append(
-                f"  🔴 Longs: ${total_long:,.0f} | 🟢 Shorts: ${total_short:,.0f}"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "<b>💥 24H LIQUIDATIONS</b>\n"
+                f"Total: ${total:,.0f} [FLUSH 🌊]\n"
+                f"Longs: ${longs:,.0f} | Shorts: ${shorts:,.0f}\n"
+                f"Composition: {long_pct:.1f}% Longs | {100-long_pct:.1f}% Shorts\n"
             )
 
-        if upcoming_macro:
-            lines.append("\n<b>📆 Macro Calendar (High Impact)</b>")
-            for event in upcoming_macro[:3]:
-                impact_icon = "🔴" if event.get("impact") == "HIGH" else "🟡"
-                lines.append(
-                    f"  {impact_icon} {html_safe(event.get('title'))}"
-                )
-
-        lines.append(f"\n🤖 <b>Global Summary:</b> {ai['summary']}")
-        lines.append("\n━━━━━━━━━━━━━━━")
-        lines.append("<i>Market analysis only. Not financial advice.</i>")
-
     else:
-        # ---- STANDARD DAILY DIGEST (Free) ----
+        # 📊 FREE DIGEST — Full Master Plan Format
         lines = [
-            "📊 <b>DAILY MARKET DIGEST</b>",
-            f"📅 {date_str}",
+            "📊 <b>CRYPTON INTEL — DAILY DIGEST</b>",
+            f"📅 {date_str} | 9:30 AM IST",
+            "━━━━━━━━━━━━━━━━━━━━━",
             "",
             f"🌡️ <b>Market Pulse:</b> {pulse['label']} ({pulse['score']}/100)",
-            f"👀 Watch: {pulse['watch_next']}",
-            "━━━━━━━━━━━━━━━",
+            f"📌 <b>Context:</b> {pulse['context']}",
+            "━━━━━━━━━━━━━━━━━━━━━",
             "",
-            "<b>📈 Market Overview</b>",
+            "<b>📈 COIN SNAPSHOT</b>\n",
         ]
 
         for s in snapshots:
-            if not s:
-                continue
+            if not s: continue
+            trend_label = "BULLISH" if s["trend_emoji"] == "🟢" else "BEARISH"
+            vol_pct = (s["vol_ratio"] - 1) * 100
+            
             lines.append(
-                f"{s['trend_emoji']} <b>#{s['tag']}</b>: ${s['price']:,.2f} ({s['change_24h']:+.2f}%)"
+                f"{s['trend_emoji']} <b>#{s['tag']}</b> — ${s['price']:,.2f} ({s['change_24h']:+.2f}%)\n"
+                f"   RSI (1D): {s['rsi']:.1f} | Trend: {trend_label} {s['trend_emoji']} vs 50-day MA\n"
+                f"   Volume: {s['volume_status']} ({vol_pct:+.1f}% vs 20-day avg)\n"
             )
 
-        lines.append("\n━━━━━━━━━━━━━━━")
-        lines.append(f"🤖 <b>Summary:</b> {ai['summary']}")
-        lines.append("\n━━━━━━━━━━━━━━━")
-        lines.append(
-            "💎 Upgrade to Pro for Trader Read, Bias, and Volume Analysis → /upgrade"
-        )
-        lines.append("")
-        lines.append("<i>Market analysis only. Not financial advice.</i>")
+    # Common Sections (Macro, News, Summary)
+    if upcoming_macro:
+        lines.append("━━━━━━━━━━━━━━━━━━━━━\n<b>📅 MACRO EVENTS TODAY (HIGH)</b>")
+        for e in upcoming_macro:
+            lines.append(f"🔴 {e.get('title')} ({e.get('impact')})")
 
+    if top_news:
+        lines.append("━━━━━━━━━━━━━━━━━━━━━\n<b>📰 TOP HEADLINES</b>")
+        for n in top_news[:3]:
+            lines.append(f"• {html_safe(n['title'])}")
+
+    lines.append(f"━━━━━━━━━━━━━━━━━━━━━\n<b>📊 MARKET SUMMARY</b>\n{ai['summary']}")
+
+    if user_tier == "pro":
+        lines.append(f"\n<b>🎯 WHAT TO DO NOW</b>\n{ai['what_to_do']}")
+    else:
+        lines.append(
+            "\n<b>💎 PRO INSIGHT TODAY (LOCKED 🔒)</b>\n"
+            "• Key support/resistance levels identified\n"
+            "• Today's highest probability setup\n"
+            "→ Type /upgrade to unlock"
+        )
+
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━━\n<i>Market analysis only. Not financial advice.</i>")
     return "\n".join(lines)
 
 
@@ -1552,7 +1529,7 @@ async def send_daily_digest(
                 await fetch_symbol_snapshot(session, symbol, config)
             )
 
-        pulse = calculate_market_pulse(snapshots, config)
+        pulse = await calculate_market_pulse(snapshots, config)
         return await build_digest_message(
             session,
             snapshots,
@@ -1826,7 +1803,7 @@ async def rsi_scanner_loop(session):
                 if snap:
                     pulse_snapshots.append(snap)
 
-            pulse_result = calculate_market_pulse(pulse_snapshots, config)
+            pulse_result = await calculate_market_pulse(pulse_snapshots, config)
             pulse_score = pulse_result["score"]
 
             tasks = [
@@ -2289,7 +2266,7 @@ async def handle_admin_command(session, command, args, chat_id):
             snap = await fetch_symbol_snapshot(session, ps, config)
             if snap:
                 pulse_snapshots.append(snap)
-        pulse_result = calculate_market_pulse(pulse_snapshots, config)
+        pulse_result = await calculate_market_pulse(pulse_snapshots, config)
         pulse_score = pulse_result["score"]
 
         test_data = {
@@ -2300,6 +2277,9 @@ async def handle_admin_command(session, command, args, chat_id):
             "volume_ratio": 1.0,
             "trend_4h": trend_4h,
             "trend_1d": "BULL" if current_price > sma50_1d else "BEAR",
+            "closes": close_prices,
+            "highs": candle_highs,
+            "lows": candle_lows
         }
 
         signal_result = calculate_score(test_data, pulse_score, liq_data)
@@ -2410,7 +2390,7 @@ async def handle_admin_command(session, command, args, chat_id):
             snap = await fetch_symbol_snapshot(session, ps, config)
             if snap:
                 pulse_snapshots.append(snap)
-        pulse_result = calculate_market_pulse(pulse_snapshots, config)
+        pulse_result = await calculate_market_pulse(pulse_snapshots, config)
         pulse_score = pulse_result["score"]
 
         sma50_4h = await fetch_sma_trend(session, symbol, "4h", 50)
@@ -2462,6 +2442,9 @@ async def handle_admin_command(session, command, args, chat_id):
             "volume_ratio": 1.0,
             "trend_4h": trend_4h,
             "trend_1d": "BULL" if current_price > sma50_1d else "BEAR",
+            "closes": close_prices,
+            "highs": candle_highs,
+            "lows": candle_lows
         }
 
         signal_result = calculate_score(test_data, pulse_score, liq_data)

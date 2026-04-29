@@ -85,45 +85,40 @@ def get_strength_label(score: int) -> str:
 # Market Structure Detection
 # ---------------------------------------------------------------------------
 
-def get_market_structure(highs: list, lows: list) -> str:
+def get_market_structure(highs: list, lows: list, closes: list) -> str:
     """
-    Detects market structure using last 10 candles.
-    Compares recent 5 candles vs previous 5 candles.
-    Returns: "HH_HL" (bullish), "LH_LL" (bearish), or "WEAK"
-
+    Detects market structure using last 10 candles (Close-based BOS).
     HH_HL = Higher Highs + Higher Lows = bullish structure
     LH_LL = Lower Highs + Lower Lows = bearish structure
     WEAK  = No clear pattern confirmed
     """
-    if len(highs) < 10 or len(lows) < 10:
+    if len(closes) < 10:
         return "WEAK"
 
-    current_high = max(highs[-5:])
-    current_low  = min(lows[-5:])
-    prev_high    = max(highs[-10:-5])
-    prev_low     = min(lows[-10:-5])
-
-    if current_high > prev_high and current_low > prev_low:
-        return "HH_HL"
-    elif current_high < prev_high and current_low < prev_low:
-        return "LH_LL"
+    # Using closes for Break of Structure (BOS) as per Master Plan
+    current_close = closes[-1]
+    prev_close = closes[-2]
+    
+    # Simple BOS: Close above previous high or below previous low
+    recent_high = max(highs[-10:-1])
+    recent_low = min(lows[-10:-1])
+    
+    if current_close > recent_high:
+        return "HH_HL" # Bullish BOS
+    elif current_close < recent_low:
+        return "LH_LL" # Bearish BOS
+        
     return "WEAK"
 
 
-# ---------------------------------------------------------------------------
-# Core Scoring Function
-# ---------------------------------------------------------------------------
-
 def calculate_score(symbol_data: dict, market_pulse: int, liquidations: dict) -> dict | None:
     """
-    Calculates signal confidence score using 6-factor confluence weighting.
+    Calculates signal confluence score using the 6-factor model.
+    Requires 3 out of 6 factors to be "CONFIRMED".
     """
-
-    # ----- Input Validation -----
-    required_keys = ["symbol", "price", "sma50", "rsi", "volume_ratio", "trend_4h", "trend_1d"]
+    required_keys = ["symbol", "price", "sma50", "rsi", "volume_ratio", "trend_4h", "trend_1d", "closes", "highs", "lows"]
     for key in required_keys:
         if key not in symbol_data:
-            print(f"⚠️ ScoringEngine: Missing required key '{key}' in symbol_data. Skipping.")
             return None
 
     symbol       = symbol_data["symbol"]
@@ -131,167 +126,89 @@ def calculate_score(symbol_data: dict, market_pulse: int, liquidations: dict) ->
     sma50        = float(symbol_data["sma50"])
     rsi          = float(symbol_data["rsi"])
     volume_ratio = float(symbol_data["volume_ratio"])
-    trend_4h     = str(symbol_data["trend_4h"]).upper()   # "BULL" or "BEAR"
-    trend_1d     = str(symbol_data["trend_1d"]).upper()   # "BULL" or "BEAR"
+    trend_4h     = str(symbol_data["trend_4h"]).upper()
+    trend_1d     = str(symbol_data["trend_1d"]).upper()
+    closes       = symbol_data["closes"]
+    highs        = symbol_data["highs"]
+    lows         = symbol_data["lows"]
 
-    # ----- Signal Direction Gate -----
-    if rsi <= 30:
+    # 1. Signal Direction Gate
+    if rsi <= 35: # Slightly wider gate for "EARLY" state detection
         direction = "LONG"
-    elif rsi >= 70:
+    elif rsi >= 65:
         direction = "SHORT"
     else:
         return None
 
-    # ----- Initialise Score and Rationale -----
-    score    = 0
+    factors = []
     rationale = []
 
-    f_trend     = 0
-    f_volume    = 0
-    f_rsi       = 0
-    f_liq       = 0
-    f_pulse     = 0
-    f_alignment = 0
-
-    # ----- Dynamic Weight Adjustment Based on Market Pulse -----
-    trend_weight  = 25
-    volume_weight = 20
-    rsi_weight    = 20
-    liq_weight    = 15
-    pulse_weight  = 10
-    align_weight  = 5
-
-    if market_pulse > 70:
-        trend_weight += 5
-        rsi_weight   -= 5
-    elif market_pulse < 30:
-        rsi_weight   += 5
-        trend_weight -= 5
-
-    # ----- Factor 1: Trend Confluence (SMA50 on 4H) -----
-    if direction == "LONG" and price > sma50:
-        f_trend = trend_weight
-        score  += f_trend
-        rationale.append(f"✅ Trend aligned — price above SMA50 (LONG confirmed)")
-    elif direction == "SHORT" and price < sma50:
-        f_trend = trend_weight
-        score  += f_trend
-        rationale.append(f"✅ Trend aligned — price below SMA50 (SHORT confirmed)")
+    # Factor 1: Trend (Price > 50-day MA on 4H)
+    trend_ok = (direction == "LONG" and price > sma50) or (direction == "SHORT" and price < sma50)
+    if trend_ok:
+        factors.append("TREND")
+        rationale.append("✅ Trend aligned with 50-MA")
     else:
-        f_trend = -10
-        score  += f_trend
-        rationale.append(f"⚠️ Trend conflict — counter-trend signal (SMA50 opposes direction)")
+        rationale.append("⚠️ Counter-trend setup")
 
-    # ----- Factor 2: Volume Intensity (Log Scale) -----
-    # Aim for max points (volume_weight) at ~2.0x volume ratio
-    # log(2+1) = 1.09. 20 / 1.1 ~= 18.
-    raw_volume_pts = int(math.log(max(volume_ratio, 0.01) + 1) * 18)
-    f_volume = min(raw_volume_pts, volume_weight)
-    score   += f_volume
-
-    if volume_ratio >= 2.0:
-        rationale.append(f"✅ Volume exceptional ({volume_ratio:.1f}x avg) — {f_volume}/{volume_weight}pts")
-    elif volume_ratio >= 1.5:
-        rationale.append(f"✅ Volume elevated ({volume_ratio:.1f}x avg) — {f_volume}/{volume_weight}pts")
-    elif volume_ratio >= 1.0:
-        rationale.append(f"🟡 Volume normal ({volume_ratio:.1f}x avg) — {f_volume}/{volume_weight}pts")
+    # Factor 2: Volume (1.5x > 20-day Avg)
+    if volume_ratio >= 1.5:
+        factors.append("VOLUME")
+        rationale.append(f"✅ Volume breakout ({volume_ratio:.1f}x)")
     else:
-        rationale.append(f"⚠️ Volume weak ({volume_ratio:.1f}x avg) — {f_volume}/{volume_weight}pts")
+        rationale.append(f"🟡 Volume normal ({volume_ratio:.1f}x)")
 
-    # ----- Factor 3: RSI Extremity (Two-Tier) -----
-    if rsi <= 25 or rsi >= 75:
-        f_rsi  = rsi_weight
-        score += f_rsi
-        rationale.append(f"✅ RSI extreme ({rsi:.1f}) — full {f_rsi}pts")
-    elif rsi <= 35 or rsi >= 65:
-        f_rsi  = int(rsi_weight * 0.5)
-        score += f_rsi
-        rationale.append(f"🟡 RSI moderate extreme ({rsi:.1f}) — {f_rsi}/{rsi_weight}pts")
+    # Factor 3: RSI (Strict Oversold/Overbought)
+    rsi_ok = (direction == "LONG" and rsi <= 30) or (direction == "SHORT" and rsi >= 70)
+    if rsi_ok:
+        factors.append("RSI")
+        rationale.append(f"✅ RSI extreme ({rsi:.1f})")
     else:
-        f_rsi = 0
-        rationale.append(f"⚠️ RSI mild zone ({rsi:.1f}) — 0pts")
+        rationale.append(f"🟡 RSI moderate ({rsi:.1f})")
 
-    # ----- Factor 4: Liquidation Alignment (Reversal Strategy) -----
-    # For Reversal: LONG at oversold is confirmed by LONG liquidations (Capitulation)
-    #               SHORT at overbought is confirmed by SHORT liquidations (Exhaustion)
-    long_liq  = liquidations.get("longs", 0.0)
+    # Factor 4: Market Pulse (Sentiment Alignment)
+    pulse_ok = (direction == "LONG" and market_pulse < 40) or (direction == "SHORT" and market_pulse > 60)
+    if pulse_ok:
+        factors.append("PULSE")
+        rationale.append(f"✅ Sentiment confirms direction ({market_pulse}/100)")
+    else:
+        rationale.append(f"🟡 Sentiment neutral/mixed ({market_pulse}/100)")
+
+    # Factor 5: Liquidation (Delta Alignment)
+    long_liq = liquidations.get("longs", 0.0)
     short_liq = liquidations.get("shorts", 0.0)
-    total_liq = long_liq + short_liq
-    delta     = abs(long_liq - short_liq)
+    liq_delta = long_liq - short_liq
+    
+    # Long signal confirmed by Long liquidations (Capitulation)
+    # Short signal confirmed by Short liquidations (Exhaustion)
+    liq_ok = (direction == "LONG" and long_liq > short_liq * 2) or (direction == "SHORT" and short_liq > long_liq * 2)
+    if liq_ok:
+        factors.append("LIQUIDATION")
+        rationale.append("✅ Liquidation flush detected")
 
-    if total_liq > 0 and delta >= LIQUIDATION_SIGNIFICANCE_THRESHOLD:
-        dominant_liq = "LONG" if long_liq > short_liq else "SHORT"
-        liq_confirms_direction = (
-            (direction == "LONG"  and dominant_liq == "LONG") or
-            (direction == "SHORT" and dominant_liq == "SHORT")
-        )
-        if liq_confirms_direction:
-            f_liq  = liq_weight
-            score += f_liq
-            dominant_label = "longs" if dominant_liq == "LONG" else "shorts"
-            rationale.append(f"✅ Liquidation aligned — {dominant_label} flush/exhaustion detected (${delta:,.0f} delta)")
-        else:
-            f_liq = 0
-            rationale.append(f"⚠️ Liquidation opposing — counter-pressure dominant (${delta:,.0f} delta)")
-    elif total_liq > 0 and delta < LIQUIDATION_SIGNIFICANCE_THRESHOLD:
-        f_liq = 0
-        rationale.append(f"🟡 Liquidation insufficient delta (${delta:,.0f} < $50k threshold)")
-    else:
-        f_liq = 0
-        rationale.append(f"🟡 No liquidation data in 30min window for {symbol}")
+    # Factor 6: Market Structure (BOS)
+    structure = get_market_structure(highs, lows, closes)
+    structure_ok = (direction == "LONG" and structure == "HH_HL") or (direction == "SHORT" and structure == "LH_LL")
+    if structure_ok:
+        factors.append("BOS")
+        rationale.append("✅ Market structure breakout (BOS)")
 
-    # ----- Factor 5: Market Pulse Bonus (Contrarian Sentiment) -----
-    # "Buy the fear, Sell the greed"
-    if market_pulse < 30 and direction == "LONG":
-        f_pulse = pulse_weight
-        score  += f_pulse
-        rationale.append(f"✅ Sentiment confirms LONG (Extreme Fear: {market_pulse}/100)")
-    elif market_pulse > 70 and direction == "SHORT":
-        f_pulse = pulse_weight
-        score  += f_pulse
-        rationale.append(f"✅ Sentiment confirms SHORT (Extreme Greed: {market_pulse}/100)")
-    elif 40 <= market_pulse <= 60:
-        f_pulse = 0
-        rationale.append(f"🟡 Sentiment neutral ({market_pulse}/100) — no bonus")
-    else:
-        f_pulse = 0
-        rationale.append(f"⚠️ Sentiment misaligned with direction ({market_pulse}/100) — no bonus")
-
-    # ----- Factor 6: Timeframe Alignment (4H vs 1D) -----
-    # Confirm if signal direction matches the higher timeframe trends
-    trend_matches = False
-    if direction == "LONG" and trend_4h == "BULL" and trend_1d == "BULL":
-        trend_matches = True
-    elif direction == "SHORT" and trend_4h == "BEAR" and trend_1d == "BEAR":
-        trend_matches = True
-
-    if trend_matches:
-        f_alignment = align_weight
-        score      += f_alignment
-        rationale.append(f"✅ Timeframe aligned — Signal {direction} matches 4H/1D trends (+{f_alignment}pts)")
-    else:
-        f_alignment = 0
-        rationale.append(f"⚠️ Timeframe conflict — Signal {direction} lacks HTF alignment (4H:{trend_4h}, 1D:{trend_1d})")
-
-    # ----- Final Score Normalization -----
-    final_score = max(0, min(score, 100))
-    strength    = get_strength_label(final_score)
-    meter       = build_signal_meter(final_score)
+    confluence_count = len(factors)
+    strength = "HIGH" if confluence_count >= 5 else "STRONG" if confluence_count >= 4 else "MODERATE" if confluence_count >= 3 else "EARLY"
+    
+    # 3/6 threshold for confirmation
+    is_confirmed = confluence_count >= 3
 
     return {
-        "symbol":           symbol,
-        "direction":        direction,
-        "score":            final_score,
-        "strength":         strength,
-        "meter":            meter,
-        "rationale":        rationale,
-        "timestamp":        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-        "components": {
-            "trend_score":     max(f_trend, 0),
-            "volume_score":    f_volume,
-            "rsi_score":       f_rsi,
-            "liq_score":       f_liq,
-            "pulse_score":     f_pulse,
-            "alignment_score": f_alignment,
-        }
+        "symbol": symbol,
+        "direction": direction,
+        "confluence_count": confluence_count,
+        "is_confirmed": is_confirmed,
+        "factors": factors,
+        "rationale": rationale,
+        "strength": strength,
+        "meter": "🟩" * confluence_count + "⬜" * (6 - confluence_count),
+        "price": price,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     }
+

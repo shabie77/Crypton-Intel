@@ -92,20 +92,26 @@ def get_market_structure(highs: list, lows: list, closes: list) -> str:
     LH_LL = Lower Highs + Lower Lows = bearish structure
     WEAK  = No clear pattern confirmed
     """
-    if len(closes) < 6:
+    if not highs or not lows or not closes:
+        return "WEAK"
+        
+    if len(closes) < 6 or len(highs) < 6 or len(lows) < 6:
         return "WEAK"
 
     # Using closes for Break of Structure (BOS) as per Master Plan Stage 2
-    current_close = closes[-1]
-    
-    # Simple BOS: Close above recent high or below recent low
-    recent_high = max(highs[-6:-1])
-    recent_low = min(lows[-6:-1])
-    
-    if current_close > recent_high:
-        return "HH_HL" # Bullish BOS
-    elif current_close < recent_low:
-        return "LH_LL" # Bearish BOS
+    try:
+        current_close = closes[-1]
+        
+        # Simple BOS: Close above recent high or below recent low
+        recent_high = max(highs[-6:-1])
+        recent_low = min(lows[-6:-1])
+        
+        if current_close > recent_high:
+            return "HH_HL" # Bullish BOS
+        elif current_close < recent_low:
+            return "LH_LL" # Bearish BOS
+    except (ValueError, IndexError):
+        return "WEAK"
         
     return "WEAK"
 

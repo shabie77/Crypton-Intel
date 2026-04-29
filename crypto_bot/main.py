@@ -93,7 +93,36 @@ database.init_db()
 _ACTIVE_TASKS = set()
 
 # Phase 2: Lifecycle State
-active_signal_states = database.load_bot_state("lifecycle_state", {})
+def load_lifecycle_state():
+    raw = database.load_bot_state("lifecycle_state", {})
+    normalized = {}
+    for sym, data in raw.items():
+        if isinstance(data, dict):
+            # Convert ISO strings back to datetime
+            if data.get("last_updated"):
+                try:
+                    data["last_updated"] = datetime.fromisoformat(data["last_updated"])
+                except (ValueError, TypeError):
+                    data["last_updated"] = datetime.now(timezone.utc)
+            normalized[sym] = data
+    return normalized
+
+async def save_lifecycle_state(state):
+    """
+    Persists signal lifecycle states to cloud and local.
+    """
+    # JSON normalization for timestamps
+    json_safe = {}
+    for sym, data in state.items():
+        copy_data = data.copy()
+        if isinstance(copy_data.get("last_updated"), datetime):
+            copy_data["last_updated"] = copy_data["last_updated"].isoformat()
+        json_safe[sym] = copy_data
+        
+    await asyncio.to_thread(database.save_bot_state, "lifecycle_state", json_safe)
+
+active_signal_states = load_lifecycle_state()
+LIFECYCLE_STATE_LOCK = asyncio.Lock()
 
 
 def fire_and_forget(coro):
@@ -273,37 +302,7 @@ async def save_rsi_state(state):
             logger.error(f"Error saving RSI state: {exc}")
 
 
-def load_lifecycle_state():
-    """Loads lifecycle state from Supabase, converting ISO strings back to datetime."""
-    raw = database.load_bot_state("lifecycle_state", {})
-    for sym, data in raw.items():
-        if "last_updated" in data and data["last_updated"]:
-            try:
-                data["last_updated"] = datetime.fromisoformat(
-                    data["last_updated"]
-                )
-            except Exception:
-                data["last_updated"] = None
-    return raw
 
-
-async def save_lifecycle_state(state):
-    """Saves lifecycle state to Supabase, converting datetimes to ISO strings."""
-    serializable = {}
-    for sym, data in state.items():
-        serializable[sym] = data.copy()
-        if isinstance(data.get("last_updated"), datetime):
-            serializable[sym]["last_updated"] = data[
-                "last_updated"
-            ].isoformat()
-
-    async with LIFECYCLE_STATE_LOCK:
-        try:
-            await asyncio.to_thread(
-                database.save_bot_state, "lifecycle_state", serializable
-            )
-        except Exception as exc:
-            logger.error(f"Error saving lifecycle state: {exc}")
 
 
 def load_news_state():
@@ -472,16 +471,18 @@ async def dispatch_signal_alert(session, signal_result, current_price):
     async with DISPATCH_SEMAPHORE:
         symbol = signal_result["symbol"]
         score = signal_result["score"]
-        confluence = signal_result.get("confluence_count", score // 16)
+        confluence = signal_result.get("weighted_score", score // 14)
         direction = signal_result["direction"]
         meter = signal_result["meter"]
         rationale = signal_result["rationale"]
-        structure = signal_result.get("structure", "WEAK")
+        
+        # Proper extraction from result context
+        structure = signal_result.get("structure", "HH_HL" if direction == "LONG" else "LH_LL")
         lifecycle_state = signal_result.get("lifecycle_state", "NEUTRAL")
         lifecycle_zone = signal_result.get("lifecycle_zone")
-        macro_trend = signal_result.get("macro_trend", "NEUTRAL")
-        micro_trend = signal_result.get("structure", "NEUTRAL")
-        rsi_raw = signal_result.get("rsi_raw", 50.0)
+        macro_trend = signal_result.get("macro_trend", "BULLISH" if direction == "LONG" else "BEARISH")
+        micro_trend = structure
+        rsi_raw = signal_result.get("rsi", 50.0)
 
         direction_emoji = "🟢" if direction == "LONG" else "🔴"
         direction_label = (
@@ -883,8 +884,11 @@ def evaluate_signal_lifecycle(
         "last_updated": last_updated.isoformat() if isinstance(last_updated, datetime) else last_updated,
     }
 
-    # Persist immediately to Supabase
-    database.save_bot_state("lifecycle_state", active_signal_states)
+    # Persist state (Async/Thread safe)
+    def save_bg():
+        database.save_bot_state("lifecycle_state", active_signal_states)
+    
+    asyncio.get_event_loop().run_in_executor(None, save_bg)
 
     return active_signal_states[symbol]
 
@@ -1289,12 +1293,13 @@ async def get_ai_digest_insights(session, snapshots, pulse):
         
         # Combined Prompt for efficiency + strictness
         prompt = (
-            f"Act as a professional crypto analyst. Analyze this data: {json.dumps(market_data)}\n\n"
-            "Produce exactly 3 sections in valid JSON:\n"
-            "1. trader_reads: Dictionary where key is coin tag, value is exactly 3 lines of analysis. Each MUST mention a specific price level and directional bias.\n"
-            "2. market_bias: Dictionary with 'overall' (Risk-On, Risk-Off, or Neutral) and one-line bias per coin.\n"
-            "3. summary: Exactly 4 lines of market summary. Be specific, contrarian when needed, mention levels.\n"
-            "4. what_to_do: 2-3 lines of actionable, specific guidance.\n"
+            f"Act as a professional crypto analyst for 'Crypton Intel'. Analyze this data: {json.dumps(market_data)}\n\n"
+            "RESPONSE MUST BE VALID JSON ONLY. NO OTHER TEXT.\n"
+            "Structure your response with these exact keys:\n"
+            "1. trader_reads: Dictionary where key is coin tag, value is exactly 3 lines of analysis mentioning levels/bias.\n"
+            "2. streaks: String summarizing notable coin streaks (e.g., BTC up 3 days).\n"
+            "3. summary: Exactly 4 lines of market summary with actionable guidance.\n"
+            "4. bias_footer: One strong line of overall directional sentiment (e.g., NEUTRAL-BULLISH: WATCH VOLUME).\n"
         )
 
         try:
@@ -1305,9 +1310,9 @@ async def get_ai_digest_insights(session, snapshots, pulse):
                     data = json.loads(match.group(0))
                     result = {
                         "trader_reads": data.get("trader_reads", {}),
-                        "market_bias": data.get("market_bias", {}),
+                        "streaks": data.get("streaks", "No notable streaks."),
                         "summary": data.get("summary", "Market consolidating at key levels."),
-                        "what_to_do": data.get("what_to_do", "Watch for volume confirmation at support.")
+                        "bias_footer": data.get("bias_footer", "Neutral - Watch volume.")
                     }
                     _AI_SUMMARY_CACHE[cache_key] = (result, datetime.now())
                     return result
@@ -1327,11 +1332,10 @@ async def get_ai_market_summary(session, snapshots, pulse):
 
 
 async def build_digest_message(
-    session, snapshots, pulse, config, top_news=None, upcoming_macro=None, liq_stats=None, 
+    session, snapshots, pulse, config, insights, top_news=None, upcoming_macro=None, liq_stats=None, 
     macro_partial_failure=False, user_tier="free"
 ):
     date_str = utc_now().strftime("%A, %B %d, %Y")
-    ai = await get_ai_digest_insights(session, snapshots, pulse)
 
     if user_tier == "pro":
         # 💎 PRO DIGEST — Full Master Plan Format
@@ -1359,7 +1363,7 @@ async def build_digest_message(
             elif s["trend_emoji"] == "🟢" and s["change_24h"] < -1.0: status = "🟡 Cooling after recent move"
             elif s["trend_emoji"] == "🔴" and s["vol_ratio"] > 1.3: status = "🔴 Selling pressure — elevated volume"
             
-            read = ai["trader_reads"].get(s["tag"], "Analysis pending...")
+            read = insights["trader_reads"].get(s["tag"], "Analysis pending...")
             
             lines.append(
                 f"{s['trend_emoji']} <b>#{s['tag']}</b> — ${s['price']:,.2f} ({s['change_24h']:+.2f}%)\n"
@@ -1408,30 +1412,39 @@ async def build_digest_message(
                 f"   Volume: {s['volume_status']} ({vol_pct:+.1f}% vs 20-day avg)\n"
             )
 
-    # Common Sections (Macro, News, Summary)
+    # Common Sections (Summary, Macro, News, Footer)
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>🤖 GLOBAL SUMMARY</b>\n"
+        f"{insights['summary']}\n\n"
+        f"🔥 <b>Streaks:</b> {insights['streaks']}\n"
+    )
+
     if upcoming_macro:
         lines.append("━━━━━━━━━━━━━━━━━━━━━\n<b>📅 MACRO EVENTS TODAY (HIGH)</b>")
         for e in upcoming_macro:
-            lines.append(f"🔴 {e.get('title')} ({e.get('impact')})")
+            lines.append(f"🔴 {e.get('title')} — <i>Why it matters: {e.get('importance', 'High impact event')}</i>")
 
     if top_news:
         lines.append("━━━━━━━━━━━━━━━━━━━━━\n<b>📰 TOP HEADLINES</b>")
-        for n in top_news[:3]:
-            lines.append(f"• {html_safe(n['title'])}")
+        for n in top_news[:5]:
+            severity = n.get("severity", "Medium")
+            lines.append(f"[{severity}] {n.get('title')} — {n.get('source', 'Unknown')}")
 
-    lines.append(f"━━━━━━━━━━━━━━━━━━━━━\n<b>📊 MARKET SUMMARY</b>\n{ai['summary']}")
-
-    if user_tier == "pro":
-        lines.append(f"\n<b>🎯 WHAT TO DO NOW</b>\n{ai['what_to_do']}")
-    else:
+    lines.append(
+        "\n━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>OVERALL BIAS:</b> {insights['bias_footer'].upper()}\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "📑 Data Source: Binance/CoinGlass/Crypton-V2\n"
+        "<i>Market analysis only. Not financial advice.</i>"
+    )
+    
+    if user_tier == "free":
         lines.append(
-            "\n<b>💎 PRO INSIGHT TODAY (LOCKED 🔒)</b>\n"
-            "• Key support/resistance levels identified\n"
-            "• Today's highest probability setup\n"
-            "→ Type /upgrade to unlock"
+            "\n🚀 <b>Upgrade to Pro</b> for specific 4H Price Targets, "
+            "Master Bias analysis, and Personalized watchlists. /upgrade"
         )
-
-    lines.append("\n━━━━━━━━━━━━━━━━━━━━━\n<i>Market analysis only. Not financial advice.</i>")
+    
     return "\n".join(lines)
 
 
@@ -1504,46 +1517,36 @@ async def send_daily_digest(
 ):
     config = await load_config()
 
-    # 1. Fetch shared context (Macro, Liq, News) to reuse across users
+    # 1. Fetch Global Data once (Macro, Liq, News, Snapshots)
     top_news = await fetch_top_news(session)
-    macro_data = await fetch_macro_events(
-        session, horizon_days=2
-    )  # 2 days horizon for better planning
-
-    # Filter for High Impact events only as per Master Plan
-    upcoming_macro = []
-    if macro_data.get("events"):
-        upcoming_macro = [
-            e for e in macro_data["events"] if e.get("impact") == "HIGH"
-        ]
+    macro_data = await fetch_macro_events(session, horizon_days=2)
+    upcoming_macro = [e for e in macro_data.get("events", []) if e.get("impact") == "HIGH"]
 
     cutoff_iso = (utc_now() - timedelta(hours=24)).isoformat()
-    liq_stats = await asyncio.to_thread(
-        database.get_24h_liquidation_stats, cutoff_iso
-    )
+    liq_stats = await asyncio.to_thread(database.get_24h_liquidation_stats, cutoff_iso)
+
+    # Master Snapshot for ALL possible coins to feed AI once
+    all_coins = list(set(config["tracked_coins"] + config["digest"]["symbols"]))
+    master_snapshots = []
+    for sym in all_coins:
+        snap = await fetch_symbol_snapshot(session, sym, config)
+        if snap: master_snapshots.append(snap)
+    
+    master_pulse = await calculate_market_pulse(master_snapshots, config)
+    master_ai = await get_ai_digest_insights(session, master_snapshots, master_pulse)
 
     async def build_content(symbols_list, user_tier="free"):
-        snapshots = []
-        for symbol in symbols_list:
-            snapshots.append(
-                await fetch_symbol_snapshot(session, symbol, config)
-            )
-
-        pulse = await calculate_market_pulse(snapshots, config)
+        # Filter master snapshots for this user's watchlist
+        user_snapshots = [s for s in master_snapshots if s["tag"] in symbols_list]
+        user_pulse = await calculate_market_pulse(user_snapshots, config)
+        
         return await build_digest_message(
-            session,
-            snapshots,
-            pulse,
-            config,
-            top_news=top_news,
-            upcoming_macro=upcoming_macro,
-            liq_stats=liq_stats,
-            macro_partial_failure=macro_data.get("partial_failure", False)
-            and not upcoming_macro,
-            user_tier=user_tier,
+            session, user_snapshots, user_pulse, config, master_ai,
+            top_news=top_news, upcoming_macro=upcoming_macro, liq_stats=liq_stats,
+            user_tier=user_tier
         )
 
-    # 2. Prepare Global Content (for Free users and Channels)
+    # 2. Prepare Global Content (Free)
     global_digest = await build_content(config["digest"]["symbols"], "free")
 
     if target_chat_id:
@@ -1632,6 +1635,11 @@ async def scan_coin_logic(
                 current_price = close_prices[-1]
                 rsi = calculate_rsi(close_prices)
 
+                # Evaluate Signal Lifecycle (Stage 3) - ALWAYS RUN to handle EXPIRED state
+                lifecycle = evaluate_signal_lifecycle(
+                    symbol, current_price, rsi, candle_highs, candle_lows, close_prices
+                )
+
                 # Basic direction gate (35/65 for early detection)
                 if rsi > 35 and rsi < 65:
                     # Reset state if neutral
@@ -1657,11 +1665,18 @@ async def scan_coin_logic(
                 is_cooldown_done = cooldown_complete(
                     state["last_alert_at"], rsi_config["cooldown_hours"]
                 )
-
                 if is_new_state or is_cooldown_done:
-                    # Fetch extra factors for scoring
-                    sma50_4h = await fetch_sma_trend(session, symbol, "4h", 50)
-                    sma50_1d = await fetch_sma_trend(session, symbol, "1d", 50)
+                    # Fetch extra factors for scoring (Optimize: reuse candles for SMA if interval matches)
+                    if interval == "4h":
+                        sma50_4h = sum(close_prices[-50:]) / 50 if len(close_prices) >= 50 else current_price
+                    else:
+                        sma50_4h = await fetch_sma_trend(session, symbol, "4h", 50)
+                        
+                    if interval == "1d":
+                        sma50_1d = sum(close_prices[-50:]) / 50 if len(close_prices) >= 50 else current_price
+                    else:
+                        sma50_1d = await fetch_sma_trend(session, symbol, "1d", 50)
+                        
                     liq_data = await fetch_coin_liquidations(session, symbol)
 
                     # Market Structure Detection (HH/HL vs LH/LL)
@@ -1691,28 +1706,9 @@ async def scan_coin_logic(
                     )
 
                     if signal_result:
-                        # Attach context data for dispatch
-                        signal_result["structure"] = structure
-                        signal_result["macro_trend"] = symbol_data["trend_1d"]
-                        signal_result["rsi_raw"] = rsi
-                        signal_result["score"] = (
-                            signal_result["confluence_count"] * 16
-                        )  # Map 6-confluence to ~100 scale for legacy UI
-
-                        # Signal Lifecycle State Machine (overlay)
-                        prev_lifecycle = active_signal_states.get(
-                            symbol, {}
-                        ).get("state", "NEUTRAL")
-                        lifecycle = evaluate_signal_lifecycle(
-                            symbol,
-                            current_price,
-                            rsi,
-                            candle_highs,
-                            candle_lows,
-                            close_prices,
-                        )
                         signal_result["lifecycle_state"] = lifecycle["state"]
                         signal_result["lifecycle_zone"] = lifecycle.get("zone")
+                        signal_result["score"] = signal_result["weighted_score"]
 
                         # Send invalidation notice if state just changed to EXPIRED
                         if (
@@ -1756,8 +1752,13 @@ async def scan_coin_logic(
                             liq_data["shorts"],
                         )
 
-                        # 3/6 mandatory threshold for confirmation
                         if signal_result["is_confirmed"]:
+                            # Inject scanner context for dispatch
+                            signal_result["structure"] = structure
+                            signal_result["rsi"] = rsi
+                            signal_result["lifecycle_state"] = lifecycle["state"]
+                            signal_result["lifecycle_zone"] = lifecycle.get("zone")
+                            
                             fire_and_forget(
                                 dispatch_signal_alert(
                                     session, signal_result, current_price
@@ -1765,7 +1766,7 @@ async def scan_coin_logic(
                             )
                             state["last_alert_at"] = utc_now().isoformat()
                             print(
-                                f"🚀 Signal confirmed: {symbol} {interval} Confluence:{signal_result['confluence_count']}/6"
+                                f"🚀 Signal confirmed: {symbol} {interval} Score:{signal_result['score']}%"
                             )
                         elif lifecycle["state"] == "WATCH":
                             # Trigger Watch Zone Alert with 6h cooldown
@@ -1776,7 +1777,7 @@ async def scan_coin_logic(
                             )
                         else:
                             print(
-                                f"🟡 Signal suppressed (Low Confluence {signal_result['confluence_count']}/6): {symbol}"
+                                f"🟡 Signal suppressed (Low Score {signal_result['score']}%): {symbol}"
                             )
 
                     state["state"] = current_state
@@ -2239,7 +2240,7 @@ async def handle_admin_command(session, command, args, chat_id):
         for cp in close_prices[1:]:
             ema21 = (cp - ema21) * multiplier + ema21
 
-        structure = get_market_structure(candle_highs, candle_lows)
+        structure = get_market_structure(candle_highs, candle_lows, close_prices)
         if current_price > ema21 and structure == "HH_HL":
             micro_trend = "BULLISH"
             trend_4h = "BULL"
@@ -2421,7 +2422,7 @@ async def handle_admin_command(session, command, args, chat_id):
         for cp in close_prices[1:]:
             ema21 = (cp - ema21) * multiplier + ema21
 
-        structure = get_market_structure(candle_highs, candle_lows)
+        structure = get_market_structure(candle_highs, candle_lows, close_prices)
         if current_price > ema21 and structure == "HH_HL":
             micro_trend = "BULLISH"
             trend_4h = "BULL"

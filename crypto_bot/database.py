@@ -2,6 +2,8 @@ import os
 import sqlite3
 import asyncio
 import json
+import threading
+import tempfile
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 
@@ -964,6 +966,9 @@ def mark_weekly_sent(week_str):
         conn.close()
 
 
+# Shared lock for local state persistence
+_STATE_LOCK = threading.Lock()
+
 def save_bot_state(key, data):
     """
     Persists bot state (JSON) to Supabase cloud if available, otherwise local file.
@@ -979,11 +984,21 @@ def save_bot_state(key, data):
         except Exception as e:
             print(f"⚠️ Supabase save_bot_state error for {key}: {e}")
 
-    # Local Fallback
+    # Local Fallback (Atomic with Lock)
     path = os.path.join(DATA_DIR, f"{key}.json")
     try:
-        with open(path, "w") as f:
-            json.dump(data, f)
+        with _STATE_LOCK:
+            # Atomic write using tempfile
+            fd, temp_path = tempfile.mkstemp(dir=DATA_DIR, prefix=f"{key}_tmp")
+            try:
+                with os.fdopen(fd, 'w') as f:
+                    json.dump(data, f)
+                # Atomic swap (os.replace is atomic on POSIX, and handles overwriting on Windows in newer Python)
+                os.replace(temp_path, path)
+            except Exception:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
     except Exception as e:
         print(f"❌ Local save_bot_state error for {key}: {e}")
 

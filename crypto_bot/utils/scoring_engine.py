@@ -116,7 +116,7 @@ def get_market_structure(highs: list, lows: list, closes: list) -> str:
     return "WEAK"
 
 
-def calculate_score(symbol_data: dict, market_pulse: int, liquidations: dict) -> dict | None:
+def calculate_score(symbol_data: dict, market_pulse: int, liquidations: dict, force_direction: str = None) -> dict | None:
     """
     Calculates weighted signal confluence score.
     Stage 2 Requirements:
@@ -141,7 +141,9 @@ def calculate_score(symbol_data: dict, market_pulse: int, liquidations: dict) ->
     lows         = symbol_data["lows"]
 
     # 1. Signal Direction Gate
-    if rsi <= 35:
+    if force_direction:
+        direction = force_direction.upper()
+    elif rsi <= 35:
         direction = "LONG"
     elif rsi >= 65:
         direction = "SHORT"
@@ -218,6 +220,7 @@ def calculate_score(symbol_data: dict, market_pulse: int, liquidations: dict) ->
         "strength": get_strength_label(confidence_pct),
         "meter": build_signal_meter(confidence_pct),
         "price": price,
+        "rsi": rsi,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     }
 

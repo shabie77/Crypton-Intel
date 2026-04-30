@@ -464,7 +464,7 @@ async def broadcast_message(
     return sent
 
 
-async def dispatch_signal_alert(session, signal_result, current_price):
+async def dispatch_signal_alert(session, signal_result, price, target_chat_id=None):
     """
     Dispatches a confluence-confirmed signal alert to all active users.
     """
@@ -482,7 +482,7 @@ async def dispatch_signal_alert(session, signal_result, current_price):
         lifecycle_zone = signal_result.get("lifecycle_zone")
         macro_trend = signal_result.get("macro_trend", "BULLISH" if direction == "LONG" else "BEARISH")
         micro_trend = structure
-        rsi_raw = signal_result.get("rsi", 50.0)
+        rsi_raw = signal_result.get("rsi", signal_result.get("rsi_raw", 50.0))
 
         direction_emoji = "🟢" if direction == "LONG" else "🔴"
         direction_label = (
@@ -502,11 +502,11 @@ async def dispatch_signal_alert(session, signal_result, current_price):
 
         # 2. STRENGTH DISPLAY MAPPING
         strength_display = {
-            "HIGH": "High Conviction — multiple factors aligned",
+            "HIGH CONVICTION": "High Conviction — multiple factors aligned",
             "STRONG": "Strong Setup — trend and volume confirmed",
             "MODERATE": "Moderate — early confirmation",
-            "EARLY": "Early Stage — watching for more confluence",
-        }.get(signal_result["strength"], signal_result["strength"])
+            "WEAK": "Weak — early stage or low confluence",
+        }.get(signal_result["strength"].upper(), signal_result["strength"])
 
         rationale_lines = "\n".join([f"  • {html_safe(r)}" for r in rationale])
 
@@ -528,9 +528,9 @@ async def dispatch_signal_alert(session, signal_result, current_price):
 
         # 5. GEMINI "WHAT TO WATCH"
         prompt = (
-            f"You are a crypto market analyst. Given this {direction} signal on {symbol} at ${current_price}:\n"
+            f"You are a crypto market analyst. Given this {direction} signal on {symbol} at ${price}:\n"
             f"Factors: {signal_result['factors']}\n"
-            f"Confluence: {confluence}/6\n\n"
+            f"Confluence: {confluence}/7\n\n"
             f"Provide EXACTLY two lines in clear trader language:\n"
             f"Line 1: Hold above $[support] = strength\n"
             f"Line 2: Drop below $[invalidation] = failure\n"
@@ -545,14 +545,14 @@ async def dispatch_signal_alert(session, signal_result, current_price):
                 what_to_watch = html_safe(raw_res.strip())
             else:
                 support = (
-                    current_price * 0.98
+                    price * 0.98
                     if direction == "LONG"
-                    else current_price * 1.02
+                    else price * 1.02
                 )
                 invalid = (
-                    current_price * 0.95
+                    price * 0.95
                     if direction == "LONG"
-                    else current_price * 1.05
+                    else price * 1.05
                 )
                 what_to_watch = f"Hold above ${support:,.2f} = strength\nDrop below ${invalid:,.2f} = failure"
         except Exception:
@@ -577,9 +577,10 @@ async def dispatch_signal_alert(session, signal_result, current_price):
         pro_msg = (
             f"🚨 <b>{symbol} Intelligence Signal</b>\n\n"
             f"Direction: {direction_emoji} {direction_label}\n"
-            f"Price: ${current_price:,.2f}\n"
+            f"Price: ${price:,.2f}\n"
             f"{quick_decision}\n\n"
-            f"📊 Confidence: {meter} ({confluence}/6)\n"
+            f"📊 Confidence: {meter} {score}%\n"
+            f"🎯 Confluence: ({confluence}/7)\n"
             f"👉 {strength_display}\n"
             f"Structure: {structure_display}\n"
             f"📍 Stage: {stage_display}\n"
@@ -616,7 +617,7 @@ async def dispatch_signal_alert(session, signal_result, current_price):
         free_msg = (
             f"🚨 <b>{symbol} Signal Detected</b>\n\n"
             f"Direction: {direction_emoji} {direction_label}\n"
-            f"Price: ${current_price:,.2f}\n\n"
+            f"Price: ${price:,.2f}\n\n"
             f"📝 {html_safe(free_summary)}\n"
             f"🎯 Action: {action}\n\n"
             f"📊 Confidence: {meter} {score}%\n\n"
@@ -625,6 +626,11 @@ async def dispatch_signal_alert(session, signal_result, current_price):
             f"and the exact price levels? → /upgrade\n"
             f"━━━━━━━━━━━━━━━\n"
         )
+
+        # ---- TARGETED DISPATCH (Private Test) ----
+        if target_chat_id:
+            await send_telegram_message(session, target_chat_id, pro_msg)
+            return
 
         # ---- DISPATCH WITH CONCURRENCY CONTROL ----
         users_with_tiers = await asyncio.to_thread(
@@ -868,8 +874,6 @@ def evaluate_signal_lifecycle(
         elif zone == "RESISTANCE" and price > (levels["resistance"] + atr_buffer):
             new_state = "EXPIRED"
 
-    # Cooldown check removed for simpler state persistence sync
-    
     # Update timestamp only on state change
     now = datetime.now(timezone.utc)
     if new_state != prev_state or not last_updated:
@@ -880,6 +884,7 @@ def evaluate_signal_lifecycle(
         "zone": zone,
         "support": levels["support"],
         "resistance": levels["resistance"],
+        "price": price,
         "atr_buffer": atr_buffer,
         "last_updated": last_updated.isoformat() if isinstance(last_updated, datetime) else last_updated,
     }
@@ -1313,9 +1318,10 @@ async def get_ai_digest_insights(session, snapshots, pulse):
         except Exception: pass
 
         return {
-            "trader_reads": {}, "market_bias": {"overall": "Neutral"},
+            "trader_reads": {}, 
+            "streaks": "No notable streaks.",
             "summary": "Market is currently showing mixed signals with neutral momentum.",
-            "what_to_do": "Monitor key levels for breakout confirmation."
+            "bias_footer": "Neutral - Watch volume."
         }
 
 
@@ -1410,8 +1416,8 @@ async def build_digest_message(
     lines.append(
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "<b>🤖 GLOBAL SUMMARY</b>\n"
-        f"{insights['summary']}\n\n"
-        f"🔥 <b>Streaks:</b> {insights['streaks']}\n"
+        f"{insights.get('summary', 'Market analysis pending.')}\n\n"
+        f"🔥 <b>Streaks:</b> {insights.get('streaks', 'Stable.')}\n"
     )
 
     if upcoming_macro:
@@ -1427,7 +1433,7 @@ async def build_digest_message(
 
     lines.append(
         "\n━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 <b>OVERALL BIAS:</b> {insights['bias_footer'].upper()}\n"
+        f"🎯 <b>OVERALL BIAS:</b> {insights.get('bias_footer', 'Neutral').upper()}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "📑 Data Source: Binance/CoinGlass/Crypton-V2\n"
         "<i>Market analysis only. Not financial advice.</i>"
@@ -1525,6 +1531,10 @@ async def send_daily_digest(
     for sym in all_coins:
         snap = await fetch_symbol_snapshot(session, sym, config)
         if snap: master_snapshots.append(snap)
+    
+    if not master_snapshots:
+        print("⚠️ No snapshots available for digest. Skipping.")
+        return
     
     master_pulse = await calculate_market_pulse(master_snapshots, config)
     master_ai = await get_ai_digest_insights(session, master_snapshots, master_pulse)
@@ -1630,6 +1640,7 @@ async def scan_coin_logic(
                 rsi = calculate_rsi(close_prices)
 
                 # Evaluate Signal Lifecycle (Stage 3) - ALWAYS RUN to handle EXPIRED state
+                prev_lifecycle = active_signal_states.get(symbol, {}).get("state", "NEUTRAL")
                 lifecycle = evaluate_signal_lifecycle(
                     symbol, current_price, rsi, candle_highs, candle_lows, close_prices
                 )
@@ -1702,7 +1713,6 @@ async def scan_coin_logic(
                     if signal_result:
                         signal_result["lifecycle_state"] = lifecycle["state"]
                         signal_result["lifecycle_zone"] = lifecycle.get("zone")
-                        signal_result["score"] = signal_result["weighted_score"]
 
                         # Send invalidation notice if state just changed to EXPIRED
                         if (
@@ -2277,76 +2287,38 @@ async def handle_admin_command(session, command, args, chat_id):
             "lows": candle_lows
         }
 
-        signal_result = calculate_score(test_data, pulse_score, liq_data)
+        # Bypass strict gate for testing, but note if it's neutral
+        force_dir = "LONG" if rsi < 50 else "SHORT"
+        
+        test_data = {
+            "symbol": symbol,
+            "price": current_price,
+            "sma50": sma50_4h,
+            "rsi": rsi,
+            "volume_ratio": 1.0,
+            "trend_4h": trend_4h,
+            "trend_1d": "BULL" if current_price > sma50_1d else "BEAR",
+            "closes": close_prices,
+            "highs": candle_highs,
+            "lows": candle_lows
+        }
+
+        signal_result = calculate_score(test_data, pulse_score, liq_data, force_direction=force_dir)
         if signal_result:
-            direction = signal_result["direction"]
-            direction_emoji = "🟢" if direction == "LONG" else "🔴"
-            direction_label = (
-                "LONG — Oversold Setup"
-                if direction == "LONG"
-                else "SHORT — Overbought Setup"
-            )
+            signal_result["structure"] = structure
+            signal_result["micro_trend"] = micro_trend
+            signal_result["macro_trend"] = test_data["trend_1d"]
+            signal_result["rsi"] = rsi # Ensure rsi is available for dispatch
+            
+            # Note if this is a neutral zone test
+            if rsi > 35 and rsi < 65:
+                signal_result["rationale"].append("🧪 TEST: Forced direction in neutral zone.")
 
-            def clean_rationale(text):
-                for k, v in {
-                    "SMA50": "50-day average",
-                    "HTF": "short-term and daily trends",
-                    "delta": "pressure",
-                }.items():
-                    text = text.replace(k, v)
-                return text
-
-            rationale_lines = "\n".join(
-                [
-                    f"  • {html_safe(clean_rationale(r))}"
-                    for r in signal_result["rationale"]
-                ]
-            )
-
-            strength_display = {
-                "HIGH CONVICTION": "High Confidence — strong setup",
-                "STRONG": "Good Confidence — setup developing well",
-                "MODERATE": "Medium — needs confirmation",
-                "WEAK": "Low — early stage only",
-            }.get(signal_result["strength"], signal_result["strength"])
-
-            score = signal_result["score"]
-            if score >= 70:
-                decision = "✅ ACTIONABLE — levels are your guide"
-            elif score >= 55:
-                decision = "⚠️ WAIT — not fully confirmed yet"
-            else:
-                decision = "❌ WEAK — low confidence, skip this one"
-
-            focus = html_safe(
-                "High conviction setup. Watch for volume confirmation on the bounce."
-                if score >= 80
-                else "Monitor for confirmation before acting."
-            )
-
-            pro_msg = (
-                f"🚨 <b>{html_safe(symbol)} Intelligence Signal</b> (Private Test)\n\n"
-                f"Direction: {direction_emoji} {direction_label}\n"
-                f"Price: ${current_price:,.2f}\n"
-                f"📌 Quick Decision: {decision}\n\n"
-                f"📊 Confidence: {signal_result['meter']} {score}%\n"
-                f"👉 {strength_display}\n"
-                f"Micro (4H): {structure_display}\n\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"<b>Why This Signal Fired</b>\n"
-                f"{rationale_lines}\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"<b>Focus:</b>\n"
-                f"{focus}\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"<i>Market analysis only. Not financial advice.</i>"
-            )
-            await send_telegram_message(session, chat_id, pro_msg)
-        else:
             await send_telegram_message(
-                session,
-                chat_id,
-                f"⚠️ No signal for {symbol} — RSI is in neutral zone ({rsi:.1f}).",
+                session, chat_id, f"🧪 <b>TEST SIGNAL: {symbol}</b> (RSI: {rsi:.1f})"
+            )
+            await dispatch_signal_alert(
+                session, signal_result, current_price, target_chat_id=chat_id
             )
         return
 
@@ -2487,6 +2459,11 @@ async def handle_admin_command(session, command, args, chat_id):
 
             age_str = "—"
             if last_upd:
+                if isinstance(last_upd, str):
+                    try:
+                        last_upd = datetime.fromisoformat(last_upd.replace("Z", "+00:00"))
+                    except Exception:
+                        last_upd = datetime.now(timezone.utc)
                 age = datetime.now(timezone.utc) - last_upd
                 hours = int(age.total_seconds() // 3600)
                 mins = int((age.total_seconds() % 3600) // 60)
@@ -2910,9 +2887,14 @@ async def get_symbol_explanation(session, symbol):
         return f"❌ No active data for {symbol}. Wait for the next scan."
 
     # We don't have the full signal_result here, so we synthesize from current state
+    price = state.get("price", 0.0)
+    if price == 0.0:
+        snap = await fetch_symbol_snapshot(session, symbol, await load_config())
+        if snap: price = snap["price"]
+
     prompt = (
-        f"Explain the trading context for {symbol} at ${state['price']:,.2f}.\n"
-        f"State: {state['state']}, Zone: {state['zone']}, Support: ${state['support']:,.2f}, Resistance: ${state['resistance']:,.2f}.\n"
+        f"Explain the trading context for {symbol} at ${price:,.2f}.\n"
+        f"State: {state.get('state', 'NEUTRAL')}, Zone: {state.get('zone', 'N/A')}, Support: ${state.get('support', 0):,.2f}, Resistance: ${state.get('resistance', 0):,.2f}.\n"
         "Provide a professional 3-sentence risk assessment."
     )
     explanation = await call_gemini_rest(
@@ -2931,18 +2913,19 @@ def get_symbol_levels(symbol):
     if not state:
         return f"❌ No levels tracked for {symbol} yet."
 
-    price = state["price"]
-    res = state["resistance"]
-    sup = state["support"]
+    price = state.get("price", 0.0)
+    res = state.get("resistance", 0.0)
+    sup = state.get("support", 0.0)
 
-    prox_res = (1 - (price / res)) * 100 if res > 0 else 0
-    prox_sup = ((price / sup) - 1) * 100 if sup > 0 else 0
+    prox_res = (1 - (price / res)) * 100 if res > 0 and price > 0 else 0
+    prox_sup = ((price / sup) - 1) * 100 if sup > 0 and price > 0 else 0
 
     return (
         f"📊 <b>Levels: {symbol.upper()}</b>\n\n"
         f"Resistance: ${res:,.2f} ({prox_res:.1f}% away)\n"
         f"Support: ${sup:,.2f} ({prox_sup:.1f}% away)\n\n"
-        f"State: {state['state']}"
+        f"State: {state.get('state', 'NEUTRAL')}\n"
+        f"Price: ${price:,.2f}"
     )
 
 
@@ -2955,14 +2938,15 @@ def get_symbol_bias(symbol):
 
     return (
         f"🧭 <b>Bias: {symbol.upper()}</b>\n\n"
-        f"Structure: {state['state']}\n"
+        f"Structure: {state.get('state', 'NEUTRAL')}\n"
         f"Zone: {state.get('zone', 'NEUTRAL')}\n\n"
-        f"Current Price: ${state['price']:,.2f}"
+        f"Current Price: ${state.get('price', 0.0):,.2f}"
     )
 
 
 async def telegram_long_polling(session):
     offset = None
+    retry_count = 0
     print("🤖 Telegram Polling Engine & Auto-Database is Live...")
 
     while True:
@@ -2980,7 +2964,11 @@ async def telegram_long_polling(session):
             ) as response:
                 if response.status != 200:
                     print(f"Telegram polling failed ({response.status})")
-                    await asyncio.sleep(1)
+                    # Exponential backoff for 429/502 etc
+                    retry_count = retry_count + 1
+                    wait_time = min(60, 2 ** retry_count)
+                    print(f"Backing off for {wait_time}s due to status {response.status}...")
+                    await asyncio.sleep(wait_time)
                     continue
 
                 updates = await response.json()
@@ -3217,6 +3205,13 @@ async def telegram_long_polling(session):
 
         except Exception as exc:
             print(f"Error in telegram_long_polling: {exc}")
+            retry_count = retry_count + 1
+            wait_time = min(60, 2 ** retry_count)
+            print(f"Backing off for {wait_time}s...")
+            await asyncio.sleep(wait_time)
+            continue
+        
+        retry_count = 0 # Reset on success
         await asyncio.sleep(0.5)
 
 

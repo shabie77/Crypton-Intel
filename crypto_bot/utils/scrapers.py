@@ -2,6 +2,7 @@ import json
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from urllib.parse import urlparse
 import aiohttp
 import logging
 
@@ -68,12 +69,25 @@ async def fetch_top_news(session):
 
                 title = item.find("title")
                 title_text = title.text if title is not None else ""
+                
+                link = item.find("link")
+                source = "Crypto News"
+                if link is not None and link.text:
+                    try:
+                        domain = urlparse(link.text).netloc.replace("www.", "")
+                        source = domain.capitalize() if domain else "Crypto News"
+                    except:
+                        pass
+                else:
+                    source = "CoinTelegraph" # default since it's the hardcoded RSS
+                
                 importance = classify_news_importance(title_text)
                 news_item = {
                     "title": title_text,
                     "level": importance["level"],
                     "emoji": importance["emoji"],
                     "impact": importance["impact"],
+                    "source": source,
                 }
                 if importance["level"] in ("CRITICAL", "MODERATE"):
                     critical_high.append(news_item)

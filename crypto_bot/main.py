@@ -375,7 +375,7 @@ async def fetch_with_backoff(session, url, params=None, retries=3):
     return None
 
 
-async def send_telegram_message(session, chat_id, text):
+async def _send_telegram_message_chunk(session, chat_id, text):
     url = f"{TELEGRAM_API_URL}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     for attempt in range(3):
@@ -417,6 +417,18 @@ async def send_telegram_message(session, chat_id, text):
     print(f"Failed to send message to {chat_id}")
     return False
 
+async def send_telegram_message(session, chat_id, text):
+    """Safely split messages over 4000 chars before sending."""
+    if len(text) <= 4000:
+        return await _send_telegram_message_chunk(session, chat_id, text)
+    
+    parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
+    success = True
+    for part in parts:
+        res = await _send_telegram_message_chunk(session, chat_id, part)
+        if not res: success = False
+        await asyncio.sleep(0.5)
+    return success
 
 async def send_telegram_message_semaphore(session, chat_id, text):
     """Wrapper for send_telegram_message with a global semaphore."""
@@ -1123,43 +1135,48 @@ async def fetch_symbol_snapshot(session, symbol, config):
 
         pair = symbol_to_pair(symbol)
         url = "https://api.binance.com/api/v3/klines"
-        # Fetch 50 candles to calculate 50-day SMA
-        params = {"symbol": pair, "interval": "1d", "limit": 50}
-        candles = await fetch_with_backoff(session, url, params)
-        if not candles:
+        
+        # Fetch 1D candles
+        params_1d = {"symbol": pair, "interval": "1d", "limit": 50}
+        candles_1d = await fetch_with_backoff(session, url, params_1d)
+        
+        # Fetch 4H candles
+        params_4h = {"symbol": pair, "interval": "4h", "limit": 50}
+        candles_4h = await fetch_with_backoff(session, url, params_4h)
+        
+        if not candles_1d or not candles_4h:
             return None
 
-        close_prices = [float(c[4]) for c in candles]
-        volumes = [float(c[5]) for c in candles]
-        current_price = close_prices[-1]
-        prev_price = (
-            close_prices[-2] if len(close_prices) > 1 else current_price
-        )
+        # Extract 1D data
+        close_prices_1d = [float(c[4]) for c in candles_1d]
+        highs_1d = [float(c[2]) for c in candles_1d]
+        lows_1d = [float(c[3]) for c in candles_1d]
+        volumes_1d = [float(c[5]) for c in candles_1d]
+        current_price = close_prices_1d[-1]
+        prev_price = close_prices_1d[-2] if len(close_prices_1d) > 1 else current_price
 
-        # Trend: Price relative to 50-day SMA
-        sma_50 = sum(close_prices) / len(close_prices)
+        # Extract 4H data
+        close_prices_4h = [float(c[4]) for c in candles_4h]
+        highs_4h = [float(c[2]) for c in candles_4h]
+        lows_4h = [float(c[3]) for c in candles_4h]
 
-        # Volume: Current 24h vs 20-day Average
-        current_vol = volumes[-1]  # Most recent 24h volume
+        sma_50 = sum(close_prices_1d) / len(close_prices_1d)
+        
+        current_vol = volumes_1d[-1]
         avg_vol_20 = (
-            sum(volumes[-21:-1]) / 20
-            if len(volumes) >= 21
+            sum(volumes_1d[-21:-1]) / 20
+            if len(volumes_1d) >= 21
             else (
-                sum(volumes[:-1]) / len(volumes[:-1])
-                if len(volumes) > 1
+                sum(volumes_1d[:-1]) / len(volumes_1d[:-1])
+                if len(volumes_1d) > 1
                 else current_vol
             )
         )
         vol_ratio = current_vol / avg_vol_20 if avg_vol_20 else 1.0
 
-        rsi = calculate_rsi(close_prices)
-        change_24h = (
-            ((current_price - prev_price) / prev_price * 100)
-            if prev_price
-            else 0.0
-        )
+        rsi = calculate_rsi(close_prices_1d)
+        change_24h = (((current_price - prev_price) / prev_price * 100) if prev_price else 0.0)
 
-        # Circle Emoji strictly for 50-day SMA alignment
         trend_emoji = "🟢" if current_price > sma_50 else "🔴"
 
         res = {
@@ -1171,11 +1188,13 @@ async def fetch_symbol_snapshot(session, symbol, config):
             "trend_emoji": trend_emoji,
             "rsi": rsi,
             "vol_ratio": vol_ratio,
-            "volume_status": (
-                "HIGH 🟢"
-                if vol_ratio > 1.5
-                else "NORMAL ⚪" if vol_ratio > 0.8 else "LOW 🔴"
-            ),
+            "volume_status": "HIGH 🟢" if vol_ratio > 1.5 else "NORMAL ⚪" if vol_ratio > 0.8 else "LOW 🔴",
+            "closes_1d": close_prices_1d,
+            "highs_1d": highs_1d,
+            "lows_1d": lows_1d,
+            "closes_4h": close_prices_4h,
+            "highs_4h": highs_4h,
+            "lows_4h": lows_4h,
         }
         _MARKET_SNAPSHOT_CACHE[symbol] = (res, now)
         return res
@@ -1186,8 +1205,15 @@ async def calculate_market_pulse(snapshots, config):
     Calculates overall market pulse score (0-100) and label.
     """
     score = 50
+    total_rsi = 0
+    total_vol = 0
+    valid_count = 0
+    
     for s in snapshots:
         if not s: continue
+        valid_count += 1
+        total_rsi += s["rsi"]
+        total_vol += s["vol_ratio"]
         # Trend contribution
         if s["trend_emoji"] == "🟢": score += 5
         else: score -= 7
@@ -1197,6 +1223,9 @@ async def calculate_market_pulse(snapshots, config):
         # 24h Change contribution
         score += int(s["change_24h"] * 2)
 
+    avg_rsi = total_rsi / valid_count if valid_count > 0 else 50
+    avg_volume = total_vol / valid_count if valid_count > 0 else 1.0
+
     powell_score = int(config.get("powell", {}).get("score", 3))
     score += (3 - powell_score) * 5
     
@@ -1204,8 +1233,12 @@ async def calculate_market_pulse(snapshots, config):
     label = "EXTREME FEAR" if score <= 25 else "FEAR" if score <= 40 else "NEUTRAL" if score <= 60 else "GREED" if score <= 80 else "EXTREME GREED"
     
     context = "Market is in an accumulation phase with neutral momentum."
-    if score > 60: context = "Bullish momentum is building across major assets."
+    if score > 60 and avg_volume > 1.2: context = "Bullish momentum is building across major assets with strong volume."
+    elif score > 60: context = "Bullish momentum is building, but volume remains average."
+    elif score < 40 and avg_volume > 1.2: context = "Heavy selling pressure is dominant. Proceed with caution."
     elif score < 40: context = "Selling pressure is dominant. Watch for key support levels."
+    elif avg_rsi > 65: context = "Market is overheating globally. Pullback likely."
+    elif avg_rsi < 35: context = "Market is broadly oversold. Relief bounce possible."
     
     return {"score": score, "label": label, "context": context}
 
@@ -1325,11 +1358,26 @@ async def get_ai_digest_insights(session, snapshots, pulse):
         }
 
 
+def find_swing_lows(lows):
+    if len(lows) < 6: return []
+    return [lows[i] for i in range(2, len(lows)-2) if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]]
+
+def find_swing_highs(highs):
+    if len(highs) < 6: return []
+    return [highs[i] for i in range(2, len(highs)-2) if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]]
+
+def determine_structure(highs, lows):
+    sh = find_swing_highs(highs)
+    sl = find_swing_lows(lows)
+    if not sh or not sl: return "🟡 Range"
+    if sh[-1] > sh[0] and sl[-1] > sl[0]: return "🟢 Bullish"
+    if sh[-1] < sh[0] and sl[-1] < sl[0]: return "🔴 Bearish"
+    return "🟡 Range"
+
 async def get_ai_market_summary(session, snapshots, pulse):
     # Keep legacy for single signal alerts if needed, or redirect to shared
     insights = await get_ai_digest_insights(session, snapshots, pulse)
     return insights["summary"]
-
 
 async def build_digest_message(
     session, snapshots, pulse, config, insights, top_news=None, upcoming_macro=None, liq_stats=None, 
@@ -1356,17 +1404,22 @@ async def build_digest_message(
             trend_label = "BULLISH" if s["trend_emoji"] == "🟢" else "BEARISH"
             vol_pct = (s["vol_ratio"] - 1) * 100
             
-            # Status Logic (Master Plan Line 172)
+            struct_4h = determine_structure(s.get("highs_4h", []), s.get("lows_4h", []))
+            struct_1d = determine_structure(s.get("highs_1d", []), s.get("lows_1d", []))
+            
+            # Status Logic
             status = "⚪ Neutral — no strong pressure"
             if s["rsi"] >= 70: status = "🔴 Overbought — potential cooling ahead"
             elif s["rsi"] <= 30: status = "🟢 Oversold — watch for reversal"
             elif s["trend_emoji"] == "🟢" and s["change_24h"] < -1.0: status = "🟡 Cooling after recent move"
             elif s["trend_emoji"] == "🔴" and s["vol_ratio"] > 1.3: status = "🔴 Selling pressure — elevated volume"
             
-            read = insights["trader_reads"].get(s["tag"], "Analysis pending...")
+            # Use html_safe to escape < and > in Gemini output
+            read = html_safe(insights["trader_reads"].get(s["tag"], "Analysis pending..."))
             
             lines.append(
                 f"{s['trend_emoji']} <b>#{s['tag']}</b> — ${s['price']:,.2f} ({s['change_24h']:+.2f}%)\n"
+                f"   Structure (4H): {struct_4h} | (1D): {struct_1d}\n"
                 f"   RSI (1D): {s['rsi']:.1f} | Trend: {trend_label} {s['trend_emoji']} vs 50-day MA\n"
                 f"   Volume: {s['volume_status']} ({vol_pct:+.1f}% vs 20-day avg)\n"
                 f"   Status: {status}\n\n"
@@ -1379,10 +1432,17 @@ async def build_digest_message(
             shorts = liq_stats.get("shorts", 0) or 0
             total = longs + shorts
             long_pct = (longs / total * 100) if total > 0 else 50
+            
+            liq_tier = "DATA UNAVAILABLE ⚪"
+            if total > 500_000_000: liq_tier = "EXTREME 🔥"
+            elif total > 150_000_000: liq_tier = "MODERATE 🟠"
+            elif total > 50_000_000: liq_tier = "NORMAL 🟡"
+            elif total > 0: liq_tier = "LOW ⚪"
+
             lines.append(
                 "━━━━━━━━━━━━━━━━━━━━━\n"
                 "<b>💥 24H LIQUIDATIONS</b>\n"
-                f"Total: ${total:,.0f} [FLUSH 🌊]\n"
+                f"Total: ${total:,.0f} [{liq_tier}]\n"
                 f"Longs: ${longs:,.0f} | Shorts: ${shorts:,.0f}\n"
                 f"Composition: {long_pct:.1f}% Longs | {100-long_pct:.1f}% Shorts\n"
             )
@@ -1406,8 +1466,12 @@ async def build_digest_message(
             trend_label = "BULLISH" if s["trend_emoji"] == "🟢" else "BEARISH"
             vol_pct = (s["vol_ratio"] - 1) * 100
             
+            struct_4h = determine_structure(s.get("highs_4h", []), s.get("lows_4h", []))
+            struct_1d = determine_structure(s.get("highs_1d", []), s.get("lows_1d", []))
+            
             lines.append(
                 f"{s['trend_emoji']} <b>#{s['tag']}</b> — ${s['price']:,.2f} ({s['change_24h']:+.2f}%)\n"
+                f"   Structure (4H): {struct_4h} | (1D): {struct_1d}\n"
                 f"   RSI (1D): {s['rsi']:.1f} | Trend: {trend_label} {s['trend_emoji']} vs 50-day MA\n"
                 f"   Volume: {s['volume_status']} ({vol_pct:+.1f}% vs 20-day avg)\n"
             )
@@ -1526,7 +1590,8 @@ async def send_daily_digest(
     liq_stats = await asyncio.to_thread(database.get_24h_liquidation_stats, cutoff_iso)
 
     # Master Snapshot for ALL possible coins to feed AI once
-    all_coins = list(set(config["tracked_coins"] + config["digest"]["symbols"]))
+    forced_coins = ["BTC", "ETH", "SOL", "XRP", "ADA", "LTC"]
+    all_coins = list(set(forced_coins + config["tracked_coins"] + config["digest"]["symbols"]))
     master_snapshots = []
     for sym in all_coins:
         snap = await fetch_symbol_snapshot(session, sym, config)
@@ -1785,7 +1850,6 @@ async def scan_coin_logic(
                             )
 
                     state["state"] = current_state
-                    await save_rsi_state(rsi_state_tracker)
         except Exception as coin_exc:
             print(f"⚠️ Error processing coin {symbol}: {coin_exc}")
 
@@ -1817,7 +1881,10 @@ async def rsi_scanner_loop(session):
                 for symbol in tracked_coins
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Batched state updates to prevent Supabase spam
             await save_lifecycle_state(active_signal_states)
+            await save_rsi_state(rsi_state_tracker)
 
             await asyncio.sleep(600)
         except Exception as exc:
@@ -2948,6 +3015,17 @@ async def telegram_long_polling(session):
     offset = None
     retry_count = 0
     print("🤖 Telegram Polling Engine & Auto-Database is Live...")
+
+    # Clear ghost webhooks to prevent 409 Conflict errors
+    try:
+        delete_url = f"{TELEGRAM_API_URL}/deleteWebhook?drop_pending_updates=True"
+        async with session.get(delete_url, timeout=10) as resp:
+            if resp.status == 200:
+                print("✅ Telegram Webhook cleared, ready for long polling.")
+            else:
+                print(f"⚠️ Failed to clear webhook: {resp.status}")
+    except Exception as e:
+        print(f"⚠️ Error clearing webhook: {e}")
 
     while True:
         url = f"{TELEGRAM_API_URL}/getUpdates"

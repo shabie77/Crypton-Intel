@@ -1244,7 +1244,6 @@ async def calculate_market_pulse(snapshots, config):
 
 
 GEMINI_MODELS = [
-    "gemini-2.0-flash-lite",
     "gemini-2.0-flash",
     "gemini-1.5-flash",
 ]
@@ -1337,18 +1336,29 @@ async def get_ai_digest_insights(session, snapshots, pulse):
         try:
             res_text = await call_gemini_rest(session, prompt) or await call_groq_rest(session, prompt)
             if res_text:
+                # Extract JSON block
                 match = re.search(r"\{.*\}", res_text, re.DOTALL)
                 if match:
-                    data = json.loads(match.group(0))
+                    raw_data = json.loads(match.group(0))
+                    
+                    # Normalize trader_reads keys (e.g. BTCUSDT -> BTC)
+                    raw_reads = raw_data.get("trader_reads", {})
+                    norm_reads = {}
+                    for k, v in raw_reads.items():
+                        norm_key = str(k).replace("USDT", "").replace("#", "").upper()
+                        norm_reads[norm_key] = v
+                    
                     result = {
-                        "trader_reads": data.get("trader_reads", {}),
-                        "streaks": data.get("streaks", "No notable streaks."),
-                        "summary": data.get("summary", "Market consolidating at key levels."),
-                        "bias_footer": data.get("bias_footer", "Neutral - Watch volume.")
+                        "trader_reads": norm_reads,
+                        "streaks": raw_data.get("streaks", "No notable streaks."),
+                        "summary": raw_data.get("summary", "Market consolidating at key levels."),
+                        "bias_footer": raw_data.get("bias_footer", "Neutral - Watch volume.")
                     }
                     _AI_SUMMARY_CACHE[cache_key] = (result, datetime.now())
                     return result
-        except Exception: pass
+        except Exception as e:
+            print(f"?? AI Digest Generation Error: {e}")
+            if res_text: print(f"Raw AI Output: {res_text[:200]}")
 
         return {
             "trader_reads": {}, 
@@ -1492,8 +1502,8 @@ async def build_digest_message(
     if top_news:
         lines.append("━━━━━━━━━━━━━━━━━━━━━\n<b>📰 TOP HEADLINES</b>")
         for n in top_news[:5]:
-            severity = n.get("severity", "Medium")
-            lines.append(f"[{severity}] {n.get('title')} — {n.get('source', 'Unknown')}")
+            level = n.get("level", "LOW")
+            lines.append(f"[{level}] {n.get('title')} — {n.get('source', 'Unknown')}")
 
     lines.append(
         "\n━━━━━━━━━━━━━━━━━━━━━\n"

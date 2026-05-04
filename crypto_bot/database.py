@@ -1023,3 +1023,27 @@ def load_bot_state(key, default=None):
         except Exception:
             pass
     return default or {}
+
+
+def get_seen_news():
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT hash FROM news_seen")
+        rows = cursor.fetchall()
+        return [row[0] for row in rows]
+    finally:
+        conn.close()
+
+def mark_news_seen(news_hash):
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute(
+            "INSERT OR IGNORE INTO news_seen (hash, seen_at) VALUES (?, ?)",
+            (news_hash, now_str)
+        )
+        conn.commit()
+    finally:
+        conn.close()

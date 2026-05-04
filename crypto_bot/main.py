@@ -9,6 +9,7 @@ from datetime import datetime, timezone, timedelta
 import logging
 import aiohttp
 import websockets
+import copy
 from dotenv import load_dotenv
 
 import database
@@ -122,8 +123,6 @@ async def save_lifecycle_state(state):
     await asyncio.to_thread(database.save_bot_state, "lifecycle_state", json_safe)
 
 active_signal_states = load_lifecycle_state()
-LIFECYCLE_STATE_LOCK = asyncio.Lock()
-
 
 def fire_and_forget(coro):
     """
@@ -259,7 +258,7 @@ async def load_config():
         )
         # Ensure we always have default keys if missing
         if isinstance(config, dict) and isinstance(DEFAULT_CONFIG, dict):
-            config = deep_merge(DEFAULT_CONFIG, config)
+            config = deep_merge(copy.deepcopy(DEFAULT_CONFIG), config)
         return config
 
 
@@ -306,15 +305,7 @@ async def save_rsi_state(state):
 
 
 def load_news_state():
-    """Load the list of already-sent news article IDs from disk."""
-    path = os.path.join(DATA_DIR, "news_state.json")
-    return read_json_file(path, [])
-
-
-def save_news_state(sent_ids):
-    """Persist sent article IDs, keeping only the last 200 to prevent unbounded growth."""
-    path = os.path.join(DATA_DIR, "news_state.json")
-    write_json_file(path, sent_ids[-200:])
+    return database.get_seen_news()
 
 
 def load_macro_state():
@@ -422,10 +413,26 @@ async def send_telegram_message(session, chat_id, text):
     if len(text) <= 4000:
         return await _send_telegram_message_chunk(session, chat_id, text)
     
-    parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
+    parts = []
+    paragraphs = text.split('\n')
+    current_part = ""
+    for p in paragraphs:
+        if len(current_part) + len(p) + 1 <= 4000:
+            current_part += p + "\n"
+        else:
+            if current_part:
+                parts.append(current_part)
+            if len(p) > 4000:
+                parts.extend([p[i:i+4000] for i in range(0, len(p), 4000)])
+                current_part = ""
+            else:
+                current_part = p + "\n"
+    if current_part:
+        parts.append(current_part)
+
     success = True
     for part in parts:
-        res = await _send_telegram_message_chunk(session, chat_id, part)
+        res = await _send_telegram_message_chunk(session, chat_id, part.strip())
         if not res: success = False
         await asyncio.sleep(0.5)
     return success
@@ -1379,9 +1386,15 @@ def find_swing_highs(highs):
 def determine_structure(highs, lows):
     sh = find_swing_highs(highs)
     sl = find_swing_lows(lows)
-    if not sh or not sl: return "🟡 Range"
-    if sh[-1] > sh[0] and sl[-1] > sl[0]: return "🟢 Bullish"
-    if sh[-1] < sh[0] and sl[-1] < sl[0]: return "🔴 Bearish"
+    if not highs or not lows: return "🟡 Range"
+    
+    first_high = sh[0] if len(sh) > 1 else highs[0]
+    last_high = sh[-1] if sh else highs[-1]
+    first_low = sl[0] if len(sl) > 1 else lows[0]
+    last_low = sl[-1] if sl else lows[-1]
+    
+    if last_high > first_high and last_low > first_low: return "🟢 Bullish"
+    if last_high < first_high and last_low < first_low: return "🔴 Bearish"
     return "🟡 Range"
 
 async def get_ai_market_summary(session, snapshots, pulse):
@@ -1720,6 +1733,17 @@ async def scan_coin_logic(
                     symbol, current_price, rsi, candle_highs, candle_lows, close_prices
                 )
 
+                # Send invalidation notice if state just changed to EXPIRED
+                if lifecycle["state"] == "EXPIRED" and prev_lifecycle != "EXPIRED":
+                    fire_and_forget(
+                        send_invalidation_notice(
+                            session,
+                            symbol,
+                            lifecycle.get("support", 0),
+                            lifecycle.get("resistance", 0),
+                        )
+                    )
+
                 # Basic direction gate (35/65 for early detection)
                 if rsi > 35 and rsi < 65:
                     # Reset state if neutral
@@ -1789,19 +1813,6 @@ async def scan_coin_logic(
                         signal_result["lifecycle_state"] = lifecycle["state"]
                         signal_result["lifecycle_zone"] = lifecycle.get("zone")
 
-                        # Send invalidation notice if state just changed to EXPIRED
-                        if (
-                            lifecycle["state"] == "EXPIRED"
-                            and prev_lifecycle != "EXPIRED"
-                        ):
-                            fire_and_forget(
-                                send_invalidation_notice(
-                                    session,
-                                    symbol,
-                                    lifecycle.get("support", 0),
-                                    lifecycle.get("resistance", 0),
-                                )
-                            )
 
                         # Log to signal_history
                         await asyncio.to_thread(
@@ -2367,18 +2378,6 @@ async def handle_admin_command(session, command, args, chat_id):
         # Bypass strict gate for testing, but note if it's neutral
         force_dir = "LONG" if rsi < 50 else "SHORT"
         
-        test_data = {
-            "symbol": symbol,
-            "price": current_price,
-            "sma50": sma50_4h,
-            "rsi": rsi,
-            "volume_ratio": 1.0,
-            "trend_4h": trend_4h,
-            "trend_1d": "BULL" if current_price > sma50_1d else "BEAR",
-            "closes": close_prices,
-            "highs": candle_highs,
-            "lows": candle_lows
-        }
 
         signal_result = calculate_score(test_data, pulse_score, liq_data, force_direction=force_dir)
         if signal_result:
@@ -2802,7 +2801,6 @@ async def news_checker_loop(session):
 
             if data and data.get("Type") == 100:
                 articles = data.get("Data", [])
-                new_alerts_sent = False
 
                 for article in articles[:20]:
                     article_id = str(article.get("id", ""))
@@ -2818,6 +2816,7 @@ async def news_checker_loop(session):
 
                     # Mark as seen immediately to prevent duplicates
                     sent_ids.append(article_id)
+                    await asyncio.to_thread(database.mark_news_seen, article_id)
 
                     # Skip articles older than 30 minutes — prevents
                     # flooding subscribers with stale news after a restart
@@ -2851,11 +2850,7 @@ async def news_checker_loop(session):
                         alert,
                         iso_now(),
                     )
-                    new_alerts_sent = True
                     print(f"Breaking news alert sent: {title[:60]}")
-
-                if new_alerts_sent or len(sent_ids) % 50 == 0:
-                    await asyncio.to_thread(save_news_state, sent_ids)
 
         except Exception as exc:
             print(f"News Checker Error: {exc}")

@@ -275,6 +275,18 @@ def add_channel(channel_id, channel_name):
             (str(channel_id), channel_name),
         )
         print(f"New channel registered: {channel_name} ({channel_id})")
+
+        # Supabase Sync
+        if supabase:
+            try:
+                supabase.table("channels").upsert({
+                    "channel_id": str(channel_id),
+                    "channel_name": channel_name,
+                    "status": "ACTIVE"
+                }).execute()
+            except Exception as e:
+                print(f"⚠️ Supabase sync error (add_channel): {e}")
+
         conn.commit()
         return True
     finally:
@@ -327,6 +339,20 @@ def add_user(user_id, username, full_name):
                 """,
                 (str(user_id), username, full_name),
             )
+        
+        # Supabase Sync
+        if supabase:
+            try:
+                supabase.table("users").upsert({
+                    "user_id": str(user_id),
+                    "username": username,
+                    "full_name": full_name,
+                    "status": "ACTIVE",
+                    "tier": existing_user[0] if existing_user else "free"
+                }).execute()
+            except Exception as e:
+                print(f"⚠️ Supabase sync error (add_user): {e}")
+
         conn.commit()
     finally:
         conn.close()
@@ -340,9 +366,22 @@ def get_user_tier(user_id):
         cursor = conn.cursor()
         cursor.execute("SELECT tier FROM users WHERE user_id = ?", (str(user_id),))
         row = cursor.fetchone()
+        
+        if row:
+            return row[0]
+            
+        # Supabase Fallback
+        if supabase:
+            try:
+                res = supabase.table("users").select("tier").eq("user_id", str(user_id)).maybe_single().execute()
+                if res and res.data:
+                    return res.data.get("tier", "free")
+            except Exception:
+                pass
+
     finally:
         conn.close()
-    return row[0] if row else "free"
+    return "free"
 
 
 def save_watchlist(user_id, coins):

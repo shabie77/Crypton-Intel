@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import aiohttp
 
 # Base directories
-DATA_DIR = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", os.path.join(os.getcwd(), "data"))
+DATA_DIR = os.getenv("DATA_DIR", os.getenv("RAILWAY_VOLUME_MOUNT_PATH", os.path.join(os.getcwd(), "data")))
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # File paths

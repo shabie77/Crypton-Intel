@@ -2,21 +2,17 @@
 commands/cmd_signal.py
 """
 import asyncio
-from datetime import datetime, timezone
 from utils.config import ADMIN_USER_ID
 from utils.config import load_config
 import aiohttp
 import database
 
-try:
-    from signals.signal_engine import scan_coin_logic
-except ImportError:
-    async def scan_coin_logic(*args, **kwargs): pass
+from signals.signal_engine import scan_coin_logic
 
 async def handle_signal(update, context):
     """Manual trigger for a specific signal."""
-    chat_id = update.effective_chat.id
-    if str(chat_id) != str(ADMIN_USER_ID):
+    user_id = update.effective_user.id
+    if str(user_id) != str(ADMIN_USER_ID):
         return
 
     args = context.args

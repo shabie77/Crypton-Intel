@@ -22,3 +22,9 @@ crypto_bot/subscribers.db
 Thumbs.db
 .idea/
 .vscode/
+*.pem
+*.diff
+*.txt
+.kimi_cache/
+crypto_bot/cache/
+*.legacy_backup

@@ -7,27 +7,11 @@ from datetime import datetime, timezone
 from utils.config import load_config
 from utils.state import active_signal_states, rsi_state_tracker
 import database
-from database import save_lifecycle_state, save_rsi_state
 
-try:
-    from utils.binance_api import fetch_symbol_snapshot
-except ImportError:
-    async def fetch_symbol_snapshot(*args, **kwargs): return None
-
-try:
-    from utils.scoring_engine import calculate_score
-except ImportError:
-    def calculate_score(*args, **kwargs): return None
-
-try:
-    from signals.signal_formatter import dispatch_signal_alert
-except ImportError:
-    async def dispatch_signal_alert(*args, **kwargs): pass
-
-try:
-    from signals.signal_cooldown import parse_timeframe_state
-except ImportError:
-    def parse_timeframe_state(*args, **kwargs): return {"state": "NEUTRAL"}
+from utils.binance_api import fetch_symbol_snapshot
+from utils.scoring_engine import calculate_score
+from signals.signal_formatter import dispatch_signal_alert
+from signals.signal_cooldown import parse_timeframe_state
 
 async def scan_coin_logic(session, symbol, config, sensitivity):
     """Core logic to evaluate a single coin for a signal."""
@@ -65,7 +49,7 @@ async def scan_coin_logic(session, symbol, config, sensitivity):
     print(f"🔥 SIGNAL FIRED: {symbol} {direction} (Score: {score}%)")
     
     active_signal_states[symbol]["state"] = "CONFIRMED"
-    await save_lifecycle_state(active_signal_states)
+    await asyncio.to_thread(database.save_bot_state, "lifecycle_state", active_signal_states)
     
     await dispatch_signal_alert(session, result, snapshot["price"])
 
@@ -78,6 +62,7 @@ async def rsi_scanner_loop(session):
             config = await load_config()
             coins = config.get("tracked_coins", ["BTC", "ETH", "SOL"])
             sensitivity = await asyncio.to_thread(database.get_sensitivity)
+            print(f"📊 Scan Cycle: {len(coins)} symbols")
             for symbol in coins:
                 await scan_coin_logic(session, symbol, config, sensitivity)
                 await asyncio.sleep(2)

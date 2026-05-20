@@ -17,14 +17,14 @@ def calculate_bias_rating(rsi, price, sma50, trend_1d):
 
 def calculate_score(test_data, pulse_score, liq_data, force_direction=None):
     """
-    Calculates signal confidence score and direction.
+    Delegates to the canonical scoring engine.
+    Real confluence scoring logic lives in utils/scoring_engine.py.
+    This function maintained for backwards compatibility only.
     """
-    # ... logic from monolith ...
-    # This was previously in utils/calculations.py but missing in the audit?
-    # I will restore it from the monolith if needed.
-    return {"score": 85, "direction": "LONG", "rationale": ["RSI Oversold", "Strong Volume"]}
+    from utils.scoring_engine import calculate_score as _real_score
+    return _real_score(test_data, pulse_score, liq_data, force_direction)
 
-async def calculate_market_pulse(snapshots, config):
+def calculate_market_pulse(snapshots, config):
     """
     Calculates overall market pulse score (0-100) and label.
     """

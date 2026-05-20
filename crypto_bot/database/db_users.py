@@ -11,11 +11,11 @@ try:
 except ImportError:
     create_client = None
 
+from utils.config import DATA_DIR, ADMIN_USER_ID
+
 # Persistence Settings
-DATA_DIR = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", os.path.join(os.getcwd(), "data"))
 DB_FILE = os.getenv("DB_FILE", os.path.join(DATA_DIR, "subscribers.db"))
 
-ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "1120431469")
 FORCE_ADMIN_PRO = True
 
 # Supabase Cloud Persistence (Phase 2)
@@ -228,6 +228,16 @@ def initialise_database():
             )
             """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS market_streaks (
+                symbol TEXT PRIMARY KEY,
+                trend TEXT,
+                last_trend TEXT,
+                streak_days INTEGER,
+                last_updated TEXT
+            )
+            """)
+
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_liq_timestamp ON liquidations(timestamp);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts_log(timestamp);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_price_alerts_user ON price_alerts(user_id);")
@@ -376,15 +386,24 @@ def get_user_tier(user_id):
                 res = supabase.table("users").select("tier").eq("user_id", str(user_id)).maybe_single().execute()
                 if res and res.data:
                     return res.data.get("tier", "free")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"⚠️ Supabase fallback error in get_user_tier (uid={user_id}): {e}")
 
     finally:
         conn.close()
     return "free"
 
 
+MAX_PRO_WATCHLIST = 5
+
+
 def save_watchlist(user_id, coins):
+    # Enforce maximum watchlist size for Pro users
+    if len(coins) > MAX_PRO_WATCHLIST:
+        raise ValueError(
+            f"⚠️ Maximum {MAX_PRO_WATCHLIST} coins allowed on your Pro watchlist.\n"
+            f"Please remove a coin before adding a new one."
+        )
     conn = _connect()
     try:
         cursor = conn.cursor()
@@ -512,6 +531,20 @@ def get_all_users():
     finally:
         conn.close()
     return rows
+
+
+def get_pro_user_count():
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users WHERE tier = 'pro'")
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+    except Exception as e:
+        print(f"⚠️ get_pro_user_count error: {e}")
+        return 0
+    finally:
+        conn.close()
 
 
 def log_alert(alert_type, symbol, content, timestamp):
@@ -752,7 +785,8 @@ def get_sensitivity():
         cursor.execute("SELECT value FROM bot_config WHERE key = 'signal_sensitivity'")
         row = cursor.fetchone()
         return int(row[0]) if row else 55
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ get_sensitivity error: {e}")
         return 55
     finally:
         conn.close()
@@ -939,7 +973,8 @@ def get_user_pro_info(user_id):
         cursor.execute("SELECT tier, pro_since FROM users WHERE user_id = ?", (str(user_id),))
         row = cursor.fetchone()
         return row if row else ("free", None)
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ get_user_pro_info error: {e}")
         return "free", None
     finally:
         conn.close()
@@ -1030,5 +1065,76 @@ def mark_news_seen(news_hash):
             (news_hash, now_str)
         )
         conn.commit()
+    finally:
+        conn.close()
+
+def update_market_streak_atomic(symbol: str, today_trend: str) -> int:
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        now_str = datetime.now(timezone.utc).isoformat()
+
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute("SELECT trend, last_trend, streak_days FROM market_streaks WHERE symbol = ?", (symbol,))
+        row = cursor.fetchone()
+
+        today_bull = "Bullish" in today_trend
+        today_bear = "Bearish" in today_trend
+
+        if row:
+            last_trend = row[1]
+            streak = row[2]
+            last_bull  = "Bullish" in last_trend if last_trend else False
+            last_bear  = "Bearish" in last_trend if last_trend else False
+
+            if today_bull and last_bull:
+                streak = streak + 1 if streak > 0 else 1
+            elif today_bear and last_bear:
+                streak = streak - 1 if streak < 0 else -1
+            else:
+                streak = 1 if today_bull else (-1 if today_bear else 0)
+        else:
+            streak = 1 if today_bull else (-1 if today_bear else 0)
+
+        cursor.execute("""
+            INSERT INTO market_streaks (symbol, trend, last_trend, streak_days, last_updated)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                trend=excluded.trend,
+                last_trend=excluded.last_trend,
+                streak_days=excluded.streak_days,
+                last_updated=excluded.last_updated
+        """, (symbol, today_trend, today_trend, streak, now_str))
+
+        conn.commit()
+        return streak
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def get_market_streaks(symbols: list[str]) -> dict:
+    if not symbols:
+        return {}
+
+    norm_symbols = [str(symbol).upper() for symbol in symbols]
+    placeholders = ", ".join("?" for _ in norm_symbols)
+
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT symbol, trend, last_trend, streak_days FROM market_streaks WHERE symbol IN ({placeholders})",
+            norm_symbols,
+        )
+        rows = cursor.fetchall()
+        return {
+            row[0]: {
+                "trend": row[1],
+                "last_trend": row[2],
+                "streak_days": row[3]
+            } for row in rows
+        }
     finally:
         conn.close()

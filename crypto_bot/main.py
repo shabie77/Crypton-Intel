@@ -10,19 +10,18 @@ import os
 import asyncio
 import aiohttp
 from dotenv import load_dotenv
-load_dotenv()  # Loads .env file — must run before any project imports
+_app_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_app_dir, ".env"))  # Loads .env file — must run before any project imports
 
 # ============================================================
 # SECTION 2 — SHARED STATE INITIALISATION
 # ============================================================
 from utils.app_state import set_db, set_bot_app
 from database.db_users import initialise_database
-import database
-from database import load_bot_state_local
 
-# Initialise database and load global states
-initialise_database()
-set_db(database)
+# Initialise database — returns live SQLite connection
+db_conn = initialise_database()
+set_db(db_conn)
 
 # ============================================================
 # SECTION 3 — TELEGRAM APPLICATION
@@ -40,9 +39,8 @@ else:
 # ============================================================
 # SECTION 4 — COMMAND HANDLER IMPORTS
 # ============================================================
-from commands.cmd_digest import handle_digest
+from commands.cmd_digest import handle_digest, handle_test_digest
 from commands.cmd_signal import handle_signal
-from commands.cmd_lifecycle import handle_lifecycle
 from commands.cmd_explain import handle_explain
 from commands.cmd_levels import handle_levels
 from commands.cmd_bias import handle_bias
@@ -54,14 +52,17 @@ from commands.cmd_status import handle_status
 # ============================================================
 from digest.digest_scheduler import start_digest_scheduler
 from signals.signal_engine import start_signal_loop
+from utils.liquidation_poller import start_liquidation_poller
+from commands.cmd_weekly import weekly_report_loop
 
 # ============================================================
 # SECTION 6 — HANDLER REGISTRATION
 # ============================================================
 if app:
     app.add_handler(CommandHandler("digest", handle_digest))
+    app.add_handler(CommandHandler("test_digest", handle_test_digest))
+    app.add_handler(CommandHandler("testdigest", handle_test_digest))
     app.add_handler(CommandHandler("signal", handle_signal))
-    app.add_handler(CommandHandler("lifecycle", handle_lifecycle))
     app.add_handler(CommandHandler("explain", handle_explain))
     app.add_handler(CommandHandler("levels", handle_levels))
     app.add_handler(CommandHandler("bias", handle_bias))
@@ -76,15 +77,14 @@ async def main():
     if os.name == "nt":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     
-    # Load persistence
-    await load_bot_state_local()
-    
     connector = aiohttp.TCPConnector(keepalive_timeout=60)
     async with aiohttp.ClientSession(connector=connector) as session:
         # Start background engines
         bg_tasks = [
             asyncio.create_task(start_digest_scheduler(session)),
-            asyncio.create_task(start_signal_loop(session))
+            asyncio.create_task(start_signal_loop(session)),
+            asyncio.create_task(start_liquidation_poller()),
+            asyncio.create_task(weekly_report_loop(session)),
         ]
         
         if app:
@@ -98,6 +98,8 @@ async def main():
             while True:
                 await asyncio.sleep(3600)
         except (KeyboardInterrupt, SystemExit):
+            for task in bg_tasks:
+                task.cancel()
             if app:
                 await app.stop()
                 await app.shutdown()

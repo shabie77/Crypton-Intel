@@ -72,4 +72,4 @@ class GeminiRotator(APIKeyRotator):
 
 class GroqRotator(APIKeyRotator):
     def __init__(self):
-        super().__init__("GROQ_KEYS", "GROQ_API_KEY")
+        super().__init__("GROQ_API_KEYS", "GROQ_API_KEY")

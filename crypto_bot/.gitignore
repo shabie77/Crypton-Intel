@@ -11,6 +11,9 @@ rsi_state.json
 last_digest.txt
 config.json
 
+# Runtime Cache (auto-generated, do not commit)
+cache/*.json
+
 # Tooling/Logs
 .ruff_cache/
 flake8_*.txt

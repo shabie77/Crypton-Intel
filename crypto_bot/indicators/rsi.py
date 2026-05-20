@@ -20,3 +20,22 @@ def calculate_rsi(prices, period=14):
         return 100.0
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
+
+
+def classify_rsi_pro(rsi: float) -> tuple[str, str]:
+    """
+    7-tier RSI label system for Pro Digest.
+    Returns (label, emoji).
+    """
+    if rsi >= 75:
+        return "Overbought — pullback risk increasing", "🔴"
+    elif rsi >= 65:
+        return "Bullish but approaching overbought", "🟡"
+    elif rsi >= 55:
+        return "Bullish momentum building", "🟢"
+    elif rsi >= 45:
+        return "Neutral momentum", "⚪"
+    elif rsi >= 35:
+        return "Bearish pressure increasing", "🟠"
+    else:
+        return "Oversold — bounce risk increasing", "🔴"

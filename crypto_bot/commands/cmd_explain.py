@@ -8,16 +8,8 @@ from utils.config import load_config
 import database
 import aiohttp
 
-try:
-    from digest.digest_gemini import call_gemini_rest, call_groq_rest
-except ImportError:
-    async def call_gemini_rest(*args, **kwargs): return None
-    async def call_groq_rest(*args, **kwargs): return None
-
-try:
-    from utils.binance_api import fetch_symbol_snapshot
-except ImportError:
-    async def fetch_symbol_snapshot(*args, **kwargs): return None
+from digest.digest_gemini import call_gemini_rest, call_groq_rest
+from utils.binance_api import fetch_symbol_snapshot
 
 async def get_symbol_explanation(session, symbol):
     """Provides a detailed AI-driven explanation of the current confluence for a symbol."""

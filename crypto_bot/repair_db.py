@@ -1,13 +1,13 @@
 import os
-import asyncio
-import json
-from datetime import datetime, timezone, timedelta
-from utils.app_state import get_db, get_bot_app
-
 import sqlite3
-import os
+from dotenv import load_dotenv
 
-DB_FILE = "subscribers.db"
+_app_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_app_dir, ".env"))
+
+# Align with the live app's DATA_DIR so we always touch the same database
+DATA_DIR = os.getenv("DATA_DIR", os.path.join(_app_dir, "data"))
+DB_FILE = os.getenv("DB_FILE", os.path.join(DATA_DIR, "subscribers.db"))
 
 def repair_db():
     if not os.path.exists(DB_FILE):
@@ -56,7 +56,7 @@ def repair_db():
                 VALUES (?, 'ACTIVE', 'free')
             """, (uid,))
         
-        admin_id = os.getenv("ADMIN_USER_ID", "1120431469")
+        admin_id = os.getenv("ADMIN_USER_ID")
         cursor.execute("UPDATE users SET tier='pro' WHERE user_id=?", (admin_id,))
         
         conn.commit()

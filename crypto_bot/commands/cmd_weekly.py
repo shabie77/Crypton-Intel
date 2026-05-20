@@ -1,43 +1,14 @@
-import os
 import asyncio
-import json
 from datetime import datetime, timezone, timedelta
-from utils.app_state import get_db, get_bot_app
-import database
+import database as database  # resolves to database/ package via __init__.py
 from utils.state import active_signal_states
 from utils.config import load_config, ADMIN_USER_ID
 import aiohttp
 
-try:
-    from digest.digest_gemini import call_gemini_rest
-except ImportError:
-    async def call_gemini_rest(*args, **kwargs): return None
-
-try:
-    from utils.helpers import html_safe
-except ImportError:
-    def html_safe(text):
-        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-try:
-    from utils.telegram import send_telegram_message
-except ImportError:
-    async def send_telegram_message(session, chat_id, text):
-        from utils.app_state import get_bot_app
-        app = get_bot_app()
-        if app:
-            try:
-                await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
-                return True
-            except Exception:
-                pass
-        return False
-
-try:
-    from utils.time_utils import iso_now
-except ImportError:
-    def iso_now():
-        return datetime.now(timezone.utc).isoformat()
+from digest.digest_gemini import call_gemini_rest
+from utils.helpers import html_safe
+from utils.telegram import send_telegram_message
+from utils.time_utils import iso_now
 
 async def build_weekly_report(session) -> str:
     """
@@ -96,8 +67,8 @@ async def build_weekly_report(session) -> str:
         ai_raw = await call_gemini_rest(session, prompt)
         if ai_raw and len(ai_raw.strip()) > 20:
             ai_summary = html_safe(ai_raw.strip())
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ Weekly AI summary error: {e}")
 
     report = (
         f"📊 <b>WEEKLY INTELLIGENCE REPORT</b>\n"
@@ -178,8 +149,8 @@ async def weekly_report_loop(session):
 
 async def handle_weekly(update, context):
     """Manual trigger for weekly report."""
-    chat_id = update.effective_chat.id
-    if str(chat_id) != str(ADMIN_USER_ID):
+    user_id = update.effective_user.id
+    if str(user_id) != str(ADMIN_USER_ID):
         return
 
     await update.message.reply_text("🚨 Triggering Manual Weekly Intelligence broadcast...")
@@ -197,8 +168,6 @@ async def handle_weekly(update, context):
                 await asyncio.sleep(0.1)
         
         now = datetime.now(timezone.utc)
-        week_str = now.strftime("%Y-%W")
-        await asyncio.to_thread(database.mark_weekly_sent, week_str)
         await asyncio.to_thread(database.log_alert, "weekly_report", "PRO", report, iso_now())
     
     await update.message.reply_text(f"✅ Weekly Intelligence broadcasted to {sent} Pro users.")

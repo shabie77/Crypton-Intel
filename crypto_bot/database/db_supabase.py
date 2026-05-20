@@ -10,8 +10,8 @@ import threading
 import tempfile
 import asyncio
 from datetime import datetime, timezone
+from utils.config import DATA_DIR
 
-DATA_DIR = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", os.path.join(os.getcwd(), "data"))
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = None
@@ -77,8 +77,8 @@ def load_bot_state(key, default=None):
         try:
             with open(path, "r") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ Local state load error: {e}")
     return default or {}
 
 

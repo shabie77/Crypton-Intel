@@ -287,9 +287,11 @@ async def build_pro_digest(
         pulse_score = 50
 
     try:
-        async with asyncio.timeout(35):
-            ai_output = await generate_pro_context(session, coin_data_list, pulse_label)
-    except TimeoutError:
+        ai_output = await asyncio.wait_for(
+            generate_pro_context(session, coin_data_list, pulse_label),
+            timeout=35
+        )
+    except asyncio.TimeoutError:
         print(f"⚠️ Pro AI timeout for user {user_id}. Using fallback.")
         ai_output = build_pro_fallback_context(coin_data_list)
     except Exception as e:

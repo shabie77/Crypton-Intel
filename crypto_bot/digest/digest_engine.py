@@ -149,9 +149,11 @@ async def build_free_digest(session: aiohttp.ClientSession) -> str:
     # ── STEP 6: Single AI call ────────────────────────────────────────────────
     try:
         # Protect AI call with timeout and fallback circuit breaker
-        async with asyncio.timeout(30):
-            ai_output = await generate_digest_context(session, coin_summaries, pulse_label)
-    except TimeoutError:
+        ai_output = await asyncio.wait_for(
+            generate_digest_context(session, coin_summaries, pulse_label),
+            timeout=30
+        )
+    except asyncio.TimeoutError:
         print("⚠️ AI generation timed out. Using fallback context.")
         ai_output = {
             "context": "The market is currently evaluating direction as key support and resistance zones are being tested.",

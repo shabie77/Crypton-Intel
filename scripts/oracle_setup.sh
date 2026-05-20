@@ -15,7 +15,7 @@ if [[ -z "${REPO_URL}" ]]; then
 fi
 
 sudo apt update
-sudo apt install -y git python3 python3-venv python3-pip
+sudo apt install -y git python3 python3-venv python3-pip python3-dev
 
 sudo mkdir -p "${APP_BASE}"
 sudo chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_BASE}"
@@ -37,6 +37,7 @@ fi
 
 mkdir -p "${SHARED_DIR}"
 touch "${SHARED_DIR}/subscribers.db"
+sudo chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_BASE}"
 
 sudo cp "${APP_ROOT}/deploy/crypto-bot.service" "/etc/systemd/system/${SERVICE_NAME}.service"
 sudo sed -i "s|User=ubuntu|User=${SERVICE_USER}|g" "/etc/systemd/system/${SERVICE_NAME}.service"

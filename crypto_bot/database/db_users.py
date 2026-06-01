@@ -14,7 +14,7 @@ except ImportError:
 from utils.config import DATA_DIR, ADMIN_USER_ID
 
 # Persistence Settings
-DB_FILE = os.getenv("DB_FILE", os.path.join(DATA_DIR, "subscribers.db"))
+DB_FILE = os.path.abspath(os.getenv("DB_FILE", os.path.join(DATA_DIR, "subscribers.db")))
 
 FORCE_ADMIN_PRO = True
 
@@ -40,7 +40,7 @@ def _connect():
 
 
 def initialise_database():
-    print("🛠️ Initializing SQLite Database (Phase 2)...")
+    print("[db] Initializing SQLite Database (Phase 2)...")
     parent_dir = os.path.dirname(DB_FILE)
     if parent_dir and not os.path.exists(parent_dir):
         os.makedirs(parent_dir, exist_ok=True)
@@ -238,6 +238,30 @@ def initialise_database():
             )
             """)
 
+        # ── Divergence Signals (RSI divergence alert history) ──────────────────────
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS divergence_signals (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol          TEXT    NOT NULL,
+                timeframe       TEXT    NOT NULL,
+                direction       TEXT    NOT NULL,
+                level           INTEGER NOT NULL,
+                price_at_signal REAL,
+                key_level       REAL,
+                volume_confirmed INTEGER DEFAULT 0,
+                fired_at        TEXT    NOT NULL,
+                expires_at      TEXT    NOT NULL
+            )
+            """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_div_signals_lookup "
+            "ON divergence_signals(symbol, timeframe, direction, level, fired_at)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_div_signals_expires "
+            "ON divergence_signals(expires_at)"
+        )
+
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_liq_timestamp ON liquidations(timestamp);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts_log(timestamp);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_price_alerts_user ON price_alerts(user_id);")
@@ -259,8 +283,7 @@ def initialise_database():
         conn.commit()
     finally:
         conn.close()
-    print("✅ Database ready.")
-    return _connect()
+    print("[db] Database ready.")
 
 
 def add_channel(channel_id, channel_name):
@@ -398,8 +421,8 @@ MAX_PRO_WATCHLIST = 5
 
 
 def save_watchlist(user_id, coins):
-    # Enforce maximum watchlist size for Pro users
-    if len(coins) > MAX_PRO_WATCHLIST:
+    # Admin has no coin limit — all other users capped at MAX_PRO_WATCHLIST
+    if len(coins) > MAX_PRO_WATCHLIST and str(user_id) != str(ADMIN_USER_ID):
         raise ValueError(
             f"⚠️ Maximum {MAX_PRO_WATCHLIST} coins allowed on your Pro watchlist.\n"
             f"Please remove a coin before adding a new one."
@@ -1136,5 +1159,187 @@ def get_market_streaks(symbols: list[str]) -> dict:
                 "streak_days": row[3]
             } for row in rows
         }
+    finally:
+        conn.close()
+
+
+# ══ Divergence Signal Functions ══════════════════════════════════════════════════════════════════════════════════
+
+_DIV_EXPIRY_HOURS = {"4h": 12, "1d": 72, "1w": 504}  # 3× timeframe period
+
+
+def create_divergence_signal(
+    symbol: str, timeframe: str, direction: str, level: int,
+    price: float, key_level, volume_confirmed: bool
+) -> int | None:
+    """Log a fired divergence alert to the DB. Returns new row ID or None on error."""
+    expiry_h = _DIV_EXPIRY_HOURS.get(timeframe.lower(), 12)
+    now      = datetime.now(timezone.utc)
+    fired_at  = now.strftime("%Y-%m-%d %H:%M:%S")
+    expires_at = (now + timedelta(hours=expiry_h)).strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO divergence_signals
+                (symbol, timeframe, direction, level, price_at_signal,
+                 key_level, volume_confirmed, fired_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                symbol.upper(), timeframe.lower(), direction, level, price,
+                key_level, 1 if volume_confirmed else 0, fired_at, expires_at,
+            ),
+        )
+        signal_id = cursor.lastrowid
+        conn.commit()
+        return signal_id
+    except Exception as e:
+        print(f"❌ create_divergence_signal error: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_recent_divergence_signal(
+    symbol: str, timeframe: str, direction: str, level: int, within_hours: int
+) -> dict | None:
+    """
+    Returns the most recent divergence signal matching the criteria if it
+    was fired within `within_hours`. Returns None if none found.
+    Pass within_hours=0 to use a 168-hour (7-day) dedup window (for 1W).
+    """
+    lookback = within_hours if within_hours > 0 else 168  # 7-day dedup for 1W
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(hours=lookback)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, symbol, timeframe, direction, level,
+                   price_at_signal, key_level, volume_confirmed, fired_at
+            FROM divergence_signals
+            WHERE symbol = ? AND timeframe = ? AND direction = ?
+              AND level = ? AND fired_at >= ?
+            ORDER BY fired_at DESC
+            LIMIT 1
+            """,
+            (symbol.upper(), timeframe.lower(), direction, level, cutoff),
+        )
+        row = cursor.fetchone()
+        if row:
+            return {
+                "id": row[0], "symbol": row[1], "timeframe": row[2],
+                "direction": row[3], "level": row[4], "price": row[5],
+                "key_level": row[6], "volume_confirmed": bool(row[7]),
+                "fired_at": row[8],
+            }
+        return None
+    except Exception as e:
+        print(f"⚠️ get_recent_divergence_signal error: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_recent_signals_for_symbols(symbols: list, within_hours: int) -> list:
+    """
+    Returns all divergence signals for a list of symbols within the given window.
+    Used by /divergence command to build status report in one query.
+    """
+    if not symbols:
+        return []
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(hours=within_hours)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    upper = [s.upper() for s in symbols]
+    placeholders = ",".join("?" * len(upper))
+
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT symbol, timeframe, direction, level, price_at_signal, fired_at
+            FROM divergence_signals
+            WHERE symbol IN ({placeholders})
+              AND fired_at >= ?
+            ORDER BY fired_at DESC
+            """,
+            (*upper, cutoff),
+        )
+        return [
+            {
+                "symbol": r[0], "timeframe": r[1], "direction": r[2],
+                "level": r[3], "price": r[4], "fired_at": r[5],
+            }
+            for r in cursor.fetchall()
+        ]
+    except Exception as e:
+        print(f"⚠️ get_recent_signals_for_symbols error: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def cleanup_expired_divergence_signals() -> int:
+    """Delete divergence_signals rows past their expires_at. Called each scan cycle."""
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM divergence_signals WHERE expires_at < ?", (now_str,))
+        deleted = cursor.rowcount
+        conn.commit()
+        if deleted > 0:
+            print(f"🧹 Divergence cleanup: {deleted} expired records removed.")
+        return deleted
+    except Exception as e:
+        print(f"⚠️ cleanup_expired_divergence_signals error: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def get_pro_users_with_watchlists() -> dict:
+    """
+    Returns {user_id_str: [coin, ...]} for Admin + all active Pro users
+    who have at least one coin in their watchlist.
+    Single-query, no N+1 DB calls.
+    """
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT u.user_id, w.coin
+            FROM users u
+            LEFT JOIN user_watchlist w ON u.user_id = w.user_id
+            WHERE u.status = 'ACTIVE'
+              AND (
+                  u.user_id = ?
+                  OR (
+                      u.tier = 'pro'
+                      AND (u.pro_expiry IS NULL OR u.pro_expiry > CURRENT_TIMESTAMP)
+                  )
+              )
+            ORDER BY u.user_id, w.coin
+            """,
+            (str(ADMIN_USER_ID),),
+        )
+        result: dict = {}
+        for user_id, coin in cursor.fetchall():
+            coins = result.setdefault(user_id, [])
+            if coin:
+                coins.append(coin)
+        return result
+    except Exception as e:
+        print(f"⚠️ get_pro_users_with_watchlists error: {e}")
+        return {}
     finally:
         conn.close()

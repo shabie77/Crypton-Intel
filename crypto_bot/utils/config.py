@@ -4,18 +4,35 @@ import asyncio
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
-_app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(_app_dir, ".env"))
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(APP_DIR)
+load_dotenv(os.path.join(APP_DIR, ".env"))
+
+
+def _resolve_data_dir() -> str:
+    configured = os.getenv("DATA_DIR")
+    if configured:
+        return os.path.abspath(configured)
+
+    primary = os.path.join(APP_DIR, "data")
+    legacy = os.path.join(PROJECT_ROOT, "data")
+
+    if os.path.isdir(primary):
+        return primary
+    if os.path.isdir(legacy):
+        return legacy
+    return primary
+
 
 # Base directories
-DATA_DIR = os.getenv("DATA_DIR", os.path.join(_app_dir, "data"))
+DATA_DIR = _resolve_data_dir()
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # File paths
-CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
-RSI_STATE_FILE = os.path.join(DATA_DIR, "rsi_state.json")
-LIFECYCLE_STATE_FILE = os.path.join(DATA_DIR, "lifecycle_state.json")
-LAST_DIGEST_FILE = os.path.join(DATA_DIR, "last_digest.txt")
+CONFIG_FILE = os.getenv("CONFIG_FILE", os.path.join(DATA_DIR, "config.json"))
+RSI_STATE_FILE = os.getenv("RSI_STATE_FILE", os.path.join(DATA_DIR, "rsi_state.json"))
+LIFECYCLE_STATE_FILE = os.getenv("LIFECYCLE_STATE_FILE", os.path.join(DATA_DIR, "lifecycle_state.json"))
+LAST_DIGEST_FILE = os.getenv("LAST_DIGEST_FILE", os.path.join(DATA_DIR, "last_digest.txt"))
 
 # Environment
 _admin_id_str = os.getenv("ADMIN_USER_ID")

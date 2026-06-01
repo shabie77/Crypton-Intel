@@ -13,15 +13,19 @@ from dotenv import load_dotenv
 _app_dir = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_app_dir, ".env"))  # Loads .env file — must run before any project imports
 
+if os.name == "nt":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 # ============================================================
 # SECTION 2 — SHARED STATE INITIALISATION
 # ============================================================
 from utils.app_state import set_db, set_bot_app
 from database.db_users import initialise_database
+import database
 
-# Initialise database — returns live SQLite connection
-db_conn = initialise_database()
-set_db(db_conn)
+# Initialise database schema and expose the database API via app state
+initialise_database()
+set_db(database)
 
 # ============================================================
 # SECTION 3 — TELEGRAM APPLICATION
@@ -46,12 +50,15 @@ from commands.cmd_levels import handle_levels
 from commands.cmd_bias import handle_bias
 from commands.cmd_weekly import handle_weekly
 from commands.cmd_status import handle_status
+from commands.cmd_divergence import handle_divergence
+from commands.cmd_watchlist import handle_watchlist
 
 # ============================================================
 # SECTION 5 — SCHEDULER IMPORTS
 # ============================================================
 from digest.digest_scheduler import start_digest_scheduler
 from signals.signal_engine import start_signal_loop
+from signals.divergence_engine import start_divergence_loop
 from utils.liquidation_poller import start_liquidation_poller
 from commands.cmd_weekly import weekly_report_loop
 
@@ -68,15 +75,14 @@ if app:
     app.add_handler(CommandHandler("bias", handle_bias))
     app.add_handler(CommandHandler("weekly", handle_weekly))
     app.add_handler(CommandHandler("status", handle_status))
+    app.add_handler(CommandHandler("divergence", handle_divergence))
+    app.add_handler(CommandHandler("watchlist", handle_watchlist))
 
 # ============================================================
 # SECTION 7 — START SCHEDULERS AND BOT
 # ============================================================
 
 async def main():
-    if os.name == "nt":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
     connector = aiohttp.TCPConnector(keepalive_timeout=60)
     async with aiohttp.ClientSession(connector=connector) as session:
         # Start background engines
@@ -85,6 +91,7 @@ async def main():
             asyncio.create_task(start_signal_loop(session)),
             asyncio.create_task(start_liquidation_poller()),
             asyncio.create_task(weekly_report_loop(session)),
+            asyncio.create_task(start_divergence_loop(session)),
         ]
         
         if app:

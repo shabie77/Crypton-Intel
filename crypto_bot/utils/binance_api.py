@@ -126,9 +126,10 @@ async def fetch_symbol_snapshot(session, symbol, config):
             candles_1w = []
 
         # ── 4H calculations ───────────────────────────────────────────────────────
-        closes_4h = [float(c[4]) for c in candles_4h]
-        highs_4h  = [float(c[2]) for c in candles_4h]
-        lows_4h   = [float(c[3]) for c in candles_4h]
+        closes_4h  = [float(c[4]) for c in candles_4h]
+        highs_4h   = [float(c[2]) for c in candles_4h]
+        lows_4h    = [float(c[3]) for c in candles_4h]
+        volumes_4h = [float(c[5]) for c in candles_4h]
 
         rsi_4h     = calculate_rsi(closes_4h)
         ema_21_4h  = calculate_ema(closes_4h, 21)
@@ -167,16 +168,18 @@ async def fetch_symbol_snapshot(session, symbol, config):
 
         # ── 1W calculations ───────────────────────────────────────────────────────
         if candles_1w:
-            closes_1w = [float(c[4]) for c in candles_1w]
-            highs_1w  = [float(c[2]) for c in candles_1w]
-            lows_1w   = [float(c[3]) for c in candles_1w]
+            closes_1w  = [float(c[4]) for c in candles_1w]
+            highs_1w   = [float(c[2]) for c in candles_1w]
+            lows_1w    = [float(c[3]) for c in candles_1w]
+            volumes_1w = [float(c[5]) for c in candles_1w]
             rsi_1w    = calculate_rsi(closes_1w)
             sma_50_1w = sum(closes_1w[-50:]) / min(50, len(closes_1w))
             trend_1w  = "BULL" if closes_1w[-1] > sma_50_1w else "BEAR"
         else:
-            closes_1w = []
-            highs_1w  = []
-            lows_1w   = []
+            closes_1w  = []
+            highs_1w   = []
+            lows_1w    = []
+            volumes_1w = []
             rsi_1w    = 50.0
             trend_1w  = "NEUTRAL"
 
@@ -213,10 +216,15 @@ async def fetch_symbol_snapshot(session, symbol, config):
             "lows_1d":   lows_1d,
 
             # ── 1W OHLCV (Pro weekly structure) ──
-            "closes_1w": closes_1w,
-            "highs_1w":  highs_1w,
-            "lows_1w":   lows_1w,
-            "trend_1w":  trend_1w,
+            "closes_1w":  closes_1w,
+            "highs_1w":   highs_1w,
+            "lows_1w":    lows_1w,
+            "trend_1w":   trend_1w,
+
+            # ── Volume arrays per TF (divergence engine) ──
+            "volumes_4h": volumes_4h,
+            "volumes_1d": volumes_1d,
+            "volumes_1w": volumes_1w,
         }
 
         async with _MARKET_CACHE_LOCK:
